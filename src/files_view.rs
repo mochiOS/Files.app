@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
 use viewkit::draw_command::DrawCommand;
-use viewkit::event::{EventContext, EventResult, ViewEvent};
+use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventResult, ViewEvent};
 use viewkit::geometry::{Point, Rect, Size};
 use viewkit::platform::{CursorIcon, Key, PointerButton};
 use viewkit::prelude::SvgData;
@@ -24,6 +24,8 @@ const LIST_ROW_HEIGHT: f32 = 29.0;
 const GRID_CELL_WIDTH: f32 = 118.0;
 const GRID_CELL_HEIGHT: f32 = 112.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+const CONTEXT_COMMAND_OPEN: u32 = 1;
+const CONTEXT_COMMAND_RELOAD: u32 = 2;
 
 const WINDOW_BACKGROUND: Color = Color::from_rgb_hex(0xf8f8f8);
 const TOOLBAR_BACKGROUND: Color = Color::from_rgb_hex(0xf2f2f2);
@@ -143,6 +145,8 @@ struct FilesState {
     path_replace_on_input: bool,
     search_focused: bool,
     last_click: Option<(PathBuf, Instant)>,
+    next_context_request: u64,
+    active_context_request: Option<u64>,
 }
 
 pub(crate) struct FilesView {
@@ -162,6 +166,8 @@ impl FilesView {
                 path_replace_on_input: false,
                 search_focused: false,
                 last_click: None,
+                next_context_request: 0,
+                active_context_request: None,
             }),
         }
     }
@@ -292,6 +298,83 @@ impl View for FilesView {
                     Some(HitTarget::Path | HitTarget::Search) | None => true,
                 };
                 if changed {
+                    context.request_redraw_in(bounds);
+                }
+                EventResult::Consumed
+            }
+            ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Secondary,
+            } => {
+                let mut state = self.state.borrow_mut();
+                let target = hit_test(&layout, *position, &state);
+                let open_enabled = if let Some(HitTarget::Entry(index)) = target {
+                    let entry = state.browser.entries().get(index).cloned().cloned();
+                    if let Some(entry) = entry {
+                        let is_directory = entry.is_directory();
+                        state.browser.select(entry.path);
+                        is_directory
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                state.next_context_request = state.next_context_request.wrapping_add(1).max(1);
+                let request_id = state.next_context_request;
+                state.active_context_request = Some(request_id);
+                context.show_context_menu(ContextMenuRequest {
+                    request_id,
+                    position: *position,
+                    items: vec![
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_OPEN,
+                            label: String::from("Open"),
+                            enabled: open_enabled,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: 0,
+                            label: String::new(),
+                            enabled: false,
+                            checked: false,
+                            destructive: false,
+                            separator: true,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_RELOAD,
+                            label: String::from("Reload"),
+                            enabled: true,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                    ],
+                });
+                context.request_redraw_in(layout.content);
+                EventResult::Consumed
+            }
+            ViewEvent::ContextMenuResult {
+                request_id,
+                command_id,
+            } => {
+                let mut state = self.state.borrow_mut();
+                if state.active_context_request != Some(*request_id) {
+                    return EventResult::Ignored;
+                }
+                state.active_context_request = None;
+                let changed = match command_id {
+                    Some(CONTEXT_COMMAND_OPEN) => state.browser.open_selected(),
+                    Some(CONTEXT_COMMAND_RELOAD) => {
+                        state.browser.reload();
+                        true
+                    }
+                    _ => false,
+                };
+                if changed {
+                    state.scroll = 0.0;
                     context.request_redraw_in(bounds);
                 }
                 EventResult::Consumed
