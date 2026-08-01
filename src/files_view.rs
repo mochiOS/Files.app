@@ -26,6 +26,11 @@ const GRID_CELL_HEIGHT: f32 = 112.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const CONTEXT_COMMAND_OPEN: u32 = 1;
 const CONTEXT_COMMAND_RELOAD: u32 = 2;
+const CONTEXT_COMMAND_NEW_FOLDER: u32 = 3;
+const CONTEXT_COMMAND_RENAME: u32 = 4;
+const CONTEXT_COMMAND_DELETE: u32 = 5;
+const CONTEXT_COMMAND_CONFIRM_DELETE: u32 = 6;
+const CONTEXT_COMMAND_CANCEL_DELETE: u32 = 7;
 
 const WINDOW_BACKGROUND: Color = Color::from_rgb_hex(0xf8f8f8);
 const TOOLBAR_BACKGROUND: Color = Color::from_rgb_hex(0xf2f2f2);
@@ -147,6 +152,15 @@ struct FilesState {
     last_click: Option<(PathBuf, Instant)>,
     next_context_request: u64,
     active_context_request: Option<u64>,
+    context_anchor: Point,
+    name_edit: Option<NameEdit>,
+    pending_delete: Option<PathBuf>,
+}
+
+struct NameEdit {
+    path: PathBuf,
+    value: String,
+    replace_on_input: bool,
 }
 
 pub(crate) struct FilesView {
@@ -168,6 +182,9 @@ impl FilesView {
                 last_click: None,
                 next_context_request: 0,
                 active_context_request: None,
+                context_anchor: Point::new(0.0, 0.0),
+                name_edit: None,
+                pending_delete: None,
             }),
         }
     }
@@ -196,6 +213,47 @@ impl FilesView {
             return Self::navigate(state, entry.path);
         }
         true
+    }
+
+    fn begin_rename(state: &mut FilesState, path: PathBuf, name: String) {
+        state.browser.select(path.clone());
+        state.name_edit = Some(NameEdit {
+            path,
+            value: name,
+            replace_on_input: true,
+        });
+        state.path_focused = false;
+        state.search_focused = false;
+    }
+
+    fn commit_name_edit(state: &mut FilesState) -> bool {
+        let Some(edit) = state.name_edit.take() else {
+            return true;
+        };
+        state.browser.select(edit.path.clone());
+        if state.browser.rename_selected(&edit.value) {
+            true
+        } else {
+            state.name_edit = Some(edit);
+            false
+        }
+    }
+
+    fn show_context_menu(
+        state: &mut FilesState,
+        position: Point,
+        items: Vec<ContextMenuItem>,
+        context: &mut EventContext<'_>,
+    ) {
+        state.next_context_request = state.next_context_request.wrapping_add(1).max(1);
+        let request_id = state.next_context_request;
+        state.active_context_request = Some(request_id);
+        state.context_anchor = position;
+        context.show_context_menu(ContextMenuRequest {
+            request_id,
+            position,
+            items,
+        });
     }
 }
 
@@ -253,6 +311,23 @@ impl View for FilesView {
             } => {
                 let mut state = self.state.borrow_mut();
                 let target = hit_test(&layout, *position, &state);
+                let clicked_path = match target {
+                    Some(HitTarget::Entry(index)) => state
+                        .browser
+                        .entries()
+                        .get(index)
+                        .map(|entry| entry.path.clone()),
+                    _ => None,
+                };
+                if let Some(edit) = state.name_edit.as_ref() {
+                    if clicked_path.as_ref() == Some(&edit.path) {
+                        return EventResult::Consumed;
+                    }
+                    if !Self::commit_name_edit(&mut state) {
+                        context.request_redraw_in(layout.content);
+                        return EventResult::Consumed;
+                    }
+                }
                 let path_clicked = matches!(target, Some(HitTarget::Path));
                 if path_clicked && !state.path_focused {
                     state.path_input = state.browser.current_dir().display().to_string();
@@ -307,30 +382,88 @@ impl View for FilesView {
                 button: PointerButton::Secondary,
             } => {
                 let mut state = self.state.borrow_mut();
+                if !Self::commit_name_edit(&mut state) {
+                    context.request_redraw_in(layout.content);
+                    return EventResult::Consumed;
+                }
                 let target = hit_test(&layout, *position, &state);
-                let open_enabled = if let Some(HitTarget::Entry(index)) = target {
+                let selected_entry = if let Some(HitTarget::Entry(index)) = target {
                     let entry = state.browser.entries().get(index).cloned().cloned();
                     if let Some(entry) = entry {
-                        let is_directory = entry.is_directory();
-                        state.browser.select(entry.path);
-                        is_directory
+                        state.browser.select(entry.path.clone());
+                        Some(entry)
                     } else {
-                        false
+                        None
                     }
                 } else {
-                    false
+                    state.browser.clear_selection();
+                    None
                 };
-                state.next_context_request = state.next_context_request.wrapping_add(1).max(1);
-                let request_id = state.next_context_request;
-                state.active_context_request = Some(request_id);
-                context.show_context_menu(ContextMenuRequest {
-                    request_id,
-                    position: *position,
-                    items: vec![
+                let items = if let Some(entry) = selected_entry {
+                    vec![
                         ContextMenuItem {
                             command_id: CONTEXT_COMMAND_OPEN,
                             label: String::from("Open"),
-                            enabled: open_enabled,
+                            enabled: entry.is_directory(),
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: 0,
+                            label: String::new(),
+                            enabled: false,
+                            checked: false,
+                            destructive: false,
+                            separator: true,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_RENAME,
+                            label: String::from("Rename"),
+                            enabled: true,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_DELETE,
+                            label: String::from("Delete"),
+                            enabled: true,
+                            checked: false,
+                            destructive: true,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: 0,
+                            label: String::new(),
+                            enabled: false,
+                            checked: false,
+                            destructive: false,
+                            separator: true,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_NEW_FOLDER,
+                            label: String::from("New Folder"),
+                            enabled: true,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_RELOAD,
+                            label: String::from("Reload"),
+                            enabled: true,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                    ]
+                } else {
+                    vec![
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_NEW_FOLDER,
+                            label: String::from("New Folder"),
+                            enabled: true,
                             checked: false,
                             destructive: false,
                             separator: false,
@@ -351,8 +484,9 @@ impl View for FilesView {
                             destructive: false,
                             separator: false,
                         },
-                    ],
-                });
+                    ]
+                };
+                Self::show_context_menu(&mut state, *position, items, context);
                 context.request_redraw_in(layout.content);
                 EventResult::Consumed
             }
@@ -367,6 +501,70 @@ impl View for FilesView {
                 state.active_context_request = None;
                 let changed = match command_id {
                     Some(CONTEXT_COMMAND_OPEN) => state.browser.open_selected(),
+                    Some(CONTEXT_COMMAND_NEW_FOLDER) => {
+                        let created = state.browser.create_folder();
+                        if let Some(path) = created {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            Self::begin_rename(&mut state, path, name);
+                        }
+                        true
+                    }
+                    Some(CONTEXT_COMMAND_RENAME) => {
+                        let selected = state.browser.selected().map(Path::to_path_buf);
+                        if let Some(path) = selected {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            Self::begin_rename(&mut state, path, name);
+                        }
+                        true
+                    }
+                    Some(CONTEXT_COMMAND_DELETE) => {
+                        state.pending_delete = state.browser.selected().map(Path::to_path_buf);
+                        if let Some(path) = state.pending_delete.as_ref() {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string());
+                            let items = vec![
+                                ContextMenuItem {
+                                    command_id: CONTEXT_COMMAND_CONFIRM_DELETE,
+                                    label: format!("Delete \"{name}\""),
+                                    enabled: true,
+                                    checked: false,
+                                    destructive: true,
+                                    separator: false,
+                                },
+                                ContextMenuItem {
+                                    command_id: CONTEXT_COMMAND_CANCEL_DELETE,
+                                    label: String::from("Cancel"),
+                                    enabled: true,
+                                    checked: false,
+                                    destructive: false,
+                                    separator: false,
+                                },
+                            ];
+                            let anchor = state.context_anchor;
+                            Self::show_context_menu(&mut state, anchor, items, context);
+                        }
+                        false
+                    }
+                    Some(CONTEXT_COMMAND_CONFIRM_DELETE) => {
+                        if let Some(path) = state.pending_delete.take() {
+                            state.browser.select(path);
+                            state.browser.delete_selected()
+                        } else {
+                            false
+                        }
+                    }
+                    Some(CONTEXT_COMMAND_CANCEL_DELETE) | None => {
+                        state.pending_delete = None;
+                        false
+                    }
                     Some(CONTEXT_COMMAND_RELOAD) => {
                         state.browser.reload();
                         true
@@ -393,6 +591,15 @@ impl View for FilesView {
             }
             ViewEvent::TextInput { text } => {
                 let mut state = self.state.borrow_mut();
+                if let Some(edit) = state.name_edit.as_mut() {
+                    if edit.replace_on_input {
+                        edit.value.clear();
+                        edit.replace_on_input = false;
+                    }
+                    edit.value.push_str(text);
+                    context.request_redraw_in(layout.content);
+                    return EventResult::Consumed;
+                }
                 if state.path_focused {
                     if state.path_replace_on_input {
                         state.path_input.clear();
@@ -412,6 +619,16 @@ impl View for FilesView {
             }
             ViewEvent::Backspace => {
                 let mut state = self.state.borrow_mut();
+                if let Some(edit) = state.name_edit.as_mut() {
+                    if edit.replace_on_input {
+                        edit.value.clear();
+                        edit.replace_on_input = false;
+                    } else {
+                        edit.value.pop();
+                    }
+                    context.request_redraw_in(layout.content);
+                    return EventResult::Consumed;
+                }
                 if state.path_focused {
                     if state.path_replace_on_input {
                         state.path_input.clear();
@@ -433,6 +650,11 @@ impl View for FilesView {
             ViewEvent::KeyPressed { key, .. } => {
                 let mut state = self.state.borrow_mut();
                 let changed = match key {
+                    Key::Escape if state.name_edit.is_some() => {
+                        state.name_edit = None;
+                        true
+                    }
+                    Key::Enter if state.name_edit.is_some() => Self::commit_name_edit(&mut state),
                     Key::Escape if state.path_focused => {
                         state.path_focused = false;
                         state.path_input.clear();
@@ -480,6 +702,7 @@ impl View for FilesView {
             }
             ViewEvent::FocusChanged { focused: false } => {
                 let mut state = self.state.borrow_mut();
+                let _ = Self::commit_name_edit(&mut state);
                 state.path_focused = false;
                 state.path_input.clear();
                 state.path_replace_on_input = false;
@@ -918,8 +1141,9 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                 context,
             );
         }
-        paint_text(
-            entry.name.clone(),
+        paint_editable_name(
+            state,
+            entry,
             Rect::new(
                 cols[0].origin.x + 24.0,
                 cols[0].origin.y,
@@ -927,7 +1151,6 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                 cols[0].size.height,
             ),
             13.0,
-            400,
             text_color,
             TextAlignment::Start,
             context,
@@ -1016,13 +1239,64 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                 .radius(viewkit::theme::CornerRadius::Custom(4.0))
                 .paint(label, context);
         }
-        paint_text(
-            entry.name.clone(),
+        paint_editable_name(
+            state,
+            entry,
             label,
             12.0,
-            400,
             if selected { Color::WHITE } else { TEXT_PRIMARY },
             TextAlignment::Center,
+            context,
+        );
+    }
+}
+
+fn paint_editable_name(
+    state: &FilesState,
+    entry: &FileEntry,
+    bounds: Rect,
+    size: f32,
+    color: Color,
+    alignment: TextAlignment,
+    context: &mut PaintContext<'_>,
+) {
+    if let Some(edit) = state
+        .name_edit
+        .as_ref()
+        .filter(|edit| edit.path == entry.path)
+    {
+        Rectangle::new()
+            .color(RectangleColor::Custom(Color::WHITE))
+            .radius(viewkit::theme::CornerRadius::Custom(3.0))
+            .paint(bounds, context);
+        context.display_list.push(DrawCommand::StrokeRoundedRect {
+            rect: Rect::new(
+                bounds.origin.x + 0.5,
+                bounds.origin.y + 0.5,
+                (bounds.size.width - 1.0).max(0.0),
+                (bounds.size.height - 1.0).max(0.0),
+            ),
+            radius: 2.5,
+            color: SELECTION,
+            width: 1.0,
+        });
+        paint_text(
+            format!("{}|", edit.value),
+            bounds,
+            size,
+            400,
+            TEXT_PRIMARY,
+            alignment,
+            context,
+        );
+    } else {
+        paint_text(
+            entry.name.clone(),
+            bounds,
+            size,
+            400,
+            color,
+            alignment,
             context,
         );
     }

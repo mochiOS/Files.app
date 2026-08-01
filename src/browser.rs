@@ -235,6 +235,104 @@ impl Browser {
         is_directory && self.navigate(selected)
     }
 
+    pub(crate) fn create_folder(&mut self) -> Option<PathBuf> {
+        let mut suffix = 1u32;
+        let path = loop {
+            let name = if suffix == 1 {
+                "New Folder".to_owned()
+            } else {
+                format!("New Folder {suffix}")
+            };
+            let candidate = self.current_dir.join(name);
+            if !candidate.exists() {
+                break candidate;
+            }
+            suffix = suffix.checked_add(1)?;
+        };
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                self.reload_select(Some(path.clone()));
+                Some(path)
+            }
+            Err(error) => {
+                self.set_operation_error("create folder", &path, error);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn rename_selected(&mut self, name: &str) -> bool {
+        let Some(source) = self.selected.clone() else {
+            return false;
+        };
+        if !valid_entry_name(name) || source.parent() != Some(self.current_dir.as_path()) {
+            self.error = Some("The name is not valid".to_owned());
+            return false;
+        }
+        let destination = self.current_dir.join(name);
+        if destination == source {
+            self.error = None;
+            return true;
+        }
+        if destination.exists() {
+            self.error = Some(format!("{} already exists", destination.display()));
+            return false;
+        }
+        match fs::rename(&source, &destination) {
+            Ok(()) => {
+                self.reload_select(Some(destination));
+                true
+            }
+            Err(error) => {
+                self.set_operation_error("rename", &source, error);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn delete_selected(&mut self) -> bool {
+        let Some(path) = self.selected.clone() else {
+            return false;
+        };
+        if path.parent() != Some(self.current_dir.as_path()) {
+            self.error = Some("The selected item cannot be deleted".to_owned());
+            return false;
+        }
+        match remove_path_tree(&path) {
+            Ok(()) => {
+                self.reload_select(None);
+                true
+            }
+            Err(error) => {
+                self.set_operation_error("delete", &path, error);
+                false
+            }
+        }
+    }
+
+    fn reload_select(&mut self, selected: Option<PathBuf>) {
+        match read_entries(&self.current_dir) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.search.clear();
+                self.selected = selected;
+                self.error = None;
+            }
+            Err(error) => {
+                self.entries.clear();
+                self.selected = None;
+                self.error = Some(format!(
+                    "Cannot read {}: {error}",
+                    self.current_dir.display()
+                ));
+            }
+        }
+    }
+
+    fn set_operation_error(&mut self, operation: &str, path: &Path, error: std::io::Error) {
+        self.error = Some(format!("Cannot {operation} {}: {error}", path.display()));
+    }
+
     fn load_history(&mut self, index: usize) -> bool {
         let Some(path) = self.history.get(index).cloned() else {
             return false;
@@ -255,6 +353,21 @@ impl Browser {
         self.selected = None;
         self.error = None;
     }
+}
+
+fn valid_entry_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+}
+
+fn remove_path_tree(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
+    for entry in fs::read_dir(path)? {
+        remove_path_tree(&entry?.path())?;
+    }
+    fs::remove_dir(path)
 }
 
 fn read_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
@@ -386,6 +499,31 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> std::io::Result<Self> {
+            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("mochios-files-{}-{sequence}", std::process::id()));
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn defaults_to_grid_view() {
@@ -424,5 +562,60 @@ mod tests {
             normalize_path(PathBuf::from("/../../tmp")),
             Path::new("/tmp")
         );
+    }
+
+    #[test]
+    fn creates_uniquely_named_folders() -> std::io::Result<()> {
+        let directory = TestDirectory::new()?;
+        let mut browser = Browser::new(directory.path());
+        let first = browser.create_folder();
+        let second = browser.create_folder();
+        let expected_first = directory.path().join("New Folder");
+        let expected_second = directory.path().join("New Folder 2");
+        assert_eq!(first.as_deref(), Some(expected_first.as_path()));
+        assert_eq!(second.as_deref(), Some(expected_second.as_path()));
+        Ok(())
+    }
+
+    #[test]
+    fn renames_without_replacing_an_existing_item() -> std::io::Result<()> {
+        let directory = TestDirectory::new()?;
+        let old = directory.path().join("old.txt");
+        let occupied = directory.path().join("occupied.txt");
+        fs::write(&old, b"old")?;
+        fs::write(&occupied, b"occupied")?;
+        let mut browser = Browser::new(directory.path());
+        browser.select(old.clone());
+        assert!(!browser.rename_selected("occupied.txt"));
+        assert!(old.exists());
+        assert!(browser.rename_selected("new.txt"));
+        assert!(!old.exists());
+        assert!(directory.path().join("new.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn deletes_a_directory_tree() -> std::io::Result<()> {
+        let directory = TestDirectory::new()?;
+        let target = directory.path().join("target");
+        fs::create_dir(&target)?;
+        fs::write(target.join("child.txt"), b"child")?;
+        let mut browser = Browser::new(directory.path());
+        browser.select(target.clone());
+        assert!(browser.delete_selected());
+        assert!(!target.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_names() -> std::io::Result<()> {
+        let directory = TestDirectory::new()?;
+        let target = directory.path().join("target");
+        fs::write(&target, b"target")?;
+        let mut browser = Browser::new(directory.path());
+        browser.select(target.clone());
+        assert!(!browser.rename_selected("../outside"));
+        assert!(target.exists());
+        Ok(())
     }
 }
