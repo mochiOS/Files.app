@@ -81,7 +81,7 @@ impl Browser {
             history_index: 0,
             search: String::new(),
             selected: None,
-            view_mode: ViewMode::List,
+            view_mode: ViewMode::Grid,
             error: None,
         };
         browser.reload();
@@ -90,19 +90,6 @@ impl Browser {
 
     pub(crate) fn current_dir(&self) -> &Path {
         &self.current_dir
-    }
-
-    pub(crate) fn title(&self) -> String {
-        if self.current_dir == Path::new("/") {
-            return "mochiOS".to_owned();
-        }
-
-        self.current_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Files")
-            .to_owned()
     }
 
     pub(crate) fn entries(&self) -> Vec<&FileEntry> {
@@ -399,6 +386,11 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_to_grid_view() {
+        assert_eq!(Browser::new("/").view_mode(), ViewMode::Grid);
+    }
 
     #[test]
     fn classifies_common_file_types() {

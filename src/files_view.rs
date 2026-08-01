@@ -15,7 +15,6 @@ use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
 
 const FOLDER_SVG: &[u8] = include_bytes!("../resources/icons/folder.svg");
 const FILE_SVG: &[u8] = include_bytes!("../resources/icons/file.svg");
-const DISK_SVG: &[u8] = include_bytes!("../resources/icons/disk.svg");
 const APPLICATION_SVG: &[u8] = include_bytes!("../resources/icons/application.svg");
 
 const TOOLBAR_HEIGHT: f32 = 54.0;
@@ -38,19 +37,17 @@ const SELECTION: Color = Color::from_rgb_hex(0x3478d4);
 const SEARCH_BACKGROUND: Color = Color::from_rgb_hex(0xe2e2e2);
 const DISABLED: Color = Color::from_rgb_hex(0xa7a7a7);
 
-const SIDEBAR_ITEMS: [SidebarItem; 5] = [
+const SIDEBAR_ITEMS: [SidebarItem; 4] = [
     SidebarItem::new("Applications", "/applications", SidebarIcon::Application),
     SidebarItem::new("System", "/system", SidebarIcon::Folder),
     SidebarItem::new("Libraries", "/libraries", SidebarIcon::Folder),
     SidebarItem::new("Temporary", "/tmp", SidebarIcon::Folder),
-    SidebarItem::new("mochiOS", "/", SidebarIcon::Disk),
 ];
 
 #[derive(Clone, Copy)]
 enum SidebarIcon {
     Application,
     Folder,
-    Disk,
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +67,6 @@ struct FileIcons {
     application: Option<SvgData>,
     folder: Option<SvgData>,
     file: Option<SvgData>,
-    disk: Option<SvgData>,
 }
 
 impl FileIcons {
@@ -79,7 +75,6 @@ impl FileIcons {
             application: SvgData::decode(APPLICATION_SVG).ok(),
             folder: SvgData::decode(FOLDER_SVG).ok(),
             file: SvgData::decode(FILE_SVG).ok(),
-            disk: SvgData::decode(DISK_SVG).ok(),
         }
     }
 
@@ -100,7 +95,6 @@ impl FileIcons {
         match icon {
             SidebarIcon::Application => self.application.as_ref(),
             SidebarIcon::Folder => self.folder.as_ref(),
-            SidebarIcon::Disk => self.disk.as_ref(),
         }
     }
 }
@@ -116,6 +110,7 @@ enum HitTarget {
     Up,
     ListMode,
     GridMode,
+    Path,
     Search,
     Sidebar(usize),
     Entry(usize),
@@ -143,6 +138,9 @@ struct FilesState {
     icons: FileIcons,
     scroll: f32,
     hover: Option<HitTarget>,
+    path_focused: bool,
+    path_input: String,
+    path_replace_on_input: bool,
     search_focused: bool,
     last_click: Option<(PathBuf, Instant)>,
 }
@@ -159,6 +157,9 @@ impl FilesView {
                 icons: FileIcons::new(),
                 scroll: 0.0,
                 hover: None,
+                path_focused: false,
+                path_input: String::new(),
+                path_replace_on_input: false,
                 search_focused: false,
                 last_click: None,
             }),
@@ -226,7 +227,7 @@ impl View for FilesView {
                     request_hover_redraw(&layout, target.as_ref(), context);
                     state.hover = target.clone();
                 }
-                if matches!(target, Some(HitTarget::Search)) {
+                if matches!(target, Some(HitTarget::Path | HitTarget::Search)) {
                     context.set_cursor(CursorIcon::Text);
                 } else if target.is_some() {
                     context.set_cursor(CursorIcon::Pointer);
@@ -246,6 +247,12 @@ impl View for FilesView {
             } => {
                 let mut state = self.state.borrow_mut();
                 let target = hit_test(&layout, *position, &state);
+                let path_clicked = matches!(target, Some(HitTarget::Path));
+                if path_clicked && !state.path_focused {
+                    state.path_input = state.browser.current_dir().display().to_string();
+                    state.path_replace_on_input = true;
+                }
+                state.path_focused = path_clicked;
                 state.search_focused = matches!(target, Some(HitTarget::Search));
                 let changed = match target {
                     Some(HitTarget::Back) => {
@@ -282,7 +289,7 @@ impl View for FilesView {
                         state.last_click = None;
                         true
                     }
-                    Some(HitTarget::Search) | None => true,
+                    Some(HitTarget::Path | HitTarget::Search) | None => true,
                 };
                 if changed {
                     context.request_redraw_in(bounds);
@@ -303,6 +310,15 @@ impl View for FilesView {
             }
             ViewEvent::TextInput { text } => {
                 let mut state = self.state.borrow_mut();
+                if state.path_focused {
+                    if state.path_replace_on_input {
+                        state.path_input.clear();
+                        state.path_replace_on_input = false;
+                    }
+                    state.path_input.push_str(text);
+                    context.request_redraw_in(layout.toolbar);
+                    return EventResult::Consumed;
+                }
                 if !state.search_focused {
                     return EventResult::Ignored;
                 }
@@ -313,6 +329,16 @@ impl View for FilesView {
             }
             ViewEvent::Backspace => {
                 let mut state = self.state.borrow_mut();
+                if state.path_focused {
+                    if state.path_replace_on_input {
+                        state.path_input.clear();
+                        state.path_replace_on_input = false;
+                    } else {
+                        state.path_input.pop();
+                    }
+                    context.request_redraw_in(layout.toolbar);
+                    return EventResult::Consumed;
+                }
                 if !state.search_focused {
                     return EventResult::Ignored;
                 }
@@ -324,18 +350,33 @@ impl View for FilesView {
             ViewEvent::KeyPressed { key, .. } => {
                 let mut state = self.state.borrow_mut();
                 let changed = match key {
+                    Key::Escape if state.path_focused => {
+                        state.path_focused = false;
+                        state.path_input.clear();
+                        state.path_replace_on_input = false;
+                        true
+                    }
                     Key::Escape if state.search_focused => {
                         state.browser.clear_search();
                         state.search_focused = false;
                         state.scroll = 0.0;
                         true
                     }
-                    Key::ArrowUp => {
+                    Key::ArrowUp if !state.path_focused => {
                         state.browser.select_relative(-1);
                         true
                     }
-                    Key::ArrowDown => {
+                    Key::ArrowDown if !state.path_focused => {
                         state.browser.select_relative(1);
+                        true
+                    }
+                    Key::Enter if state.path_focused => {
+                        let path = PathBuf::from(&state.path_input);
+                        if Self::navigate(&mut state, path) {
+                            state.path_focused = false;
+                            state.path_input.clear();
+                            state.path_replace_on_input = false;
+                        }
                         true
                     }
                     Key::Enter => {
@@ -355,7 +396,11 @@ impl View for FilesView {
                 }
             }
             ViewEvent::FocusChanged { focused: false } => {
-                self.state.borrow_mut().search_focused = false;
+                let mut state = self.state.borrow_mut();
+                state.path_focused = false;
+                state.path_input.clear();
+                state.path_replace_on_input = false;
+                state.search_focused = false;
                 context.request_redraw_in(layout.toolbar);
                 EventResult::Consumed
             }
@@ -430,6 +475,15 @@ impl Layout {
         )
     }
 
+    fn path(&self) -> Rect {
+        Rect::new(
+            self.bounds.origin.x + 125.0,
+            self.bounds.origin.y + 11.0,
+            (self.bounds.size.width - 429.0).max(80.0),
+            30.0,
+        )
+    }
+
     fn search(&self) -> Rect {
         let right = self.bounds.origin.x + self.bounds.size.width;
         Rect::new(right - 218.0, self.bounds.origin.y + 11.0, 202.0, 30.0)
@@ -463,15 +517,44 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         state.hover == Some(HitTarget::Up),
         context,
     );
-    let title_x = layout.bounds.origin.x + 127.0;
-    let title_width = (layout.bounds.size.width - 445.0).max(80.0);
+    let path = layout.path();
+    Rectangle::new()
+        .color(RectangleColor::Custom(if state.path_focused {
+            Color::WHITE
+        } else {
+            SEARCH_BACKGROUND
+        }))
+        .radius(viewkit::theme::CornerRadius::Custom(6.0))
+        .paint(path, context);
+    if state.path_focused {
+        context.display_list.push(DrawCommand::StrokeRoundedRect {
+            rect: Rect::new(
+                path.origin.x + 0.5,
+                path.origin.y + 0.5,
+                path.size.width - 1.0,
+                path.size.height - 1.0,
+            ),
+            radius: 5.5,
+            color: SELECTION,
+            width: 1.0,
+        });
+    }
     paint_text(
-        state.browser.title(),
-        Rect::new(title_x, layout.bounds.origin.y + 15.0, title_width, 24.0),
-        14.0,
-        600,
+        if state.path_focused {
+            state.path_input.clone()
+        } else {
+            state.browser.current_dir().display().to_string()
+        },
+        Rect::new(
+            path.origin.x + 9.0,
+            path.origin.y + 5.0,
+            path.size.width - 18.0,
+            20.0,
+        ),
+        13.0,
+        400,
         TEXT_PRIMARY,
-        TextAlignment::Center,
+        TextAlignment::Start,
         context,
     );
 
@@ -574,7 +657,7 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         TextAlignment::Start,
         context,
     );
-    for (index, item) in SIDEBAR_ITEMS.iter().take(4).enumerate() {
+    for (index, item) in SIDEBAR_ITEMS.iter().enumerate() {
         paint_sidebar_item(
             layout,
             state,
@@ -584,21 +667,6 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             context,
         );
     }
-    paint_text(
-        "Locations",
-        Rect::new(
-            layout.sidebar.origin.x + 16.0,
-            layout.sidebar.origin.y + 190.0,
-            layout.sidebar_width - 30.0,
-            18.0,
-        ),
-        11.0,
-        600,
-        TEXT_SECONDARY,
-        TextAlignment::Start,
-        context,
-    );
-    paint_sidebar_item(layout, state, 4, &SIDEBAR_ITEMS[4], 216.0, context);
 }
 
 fn paint_sidebar_item(
@@ -1056,11 +1124,14 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
             });
         }
     }
+    if layout.path().contains(point) {
+        return Some(HitTarget::Path);
+    }
     if layout.search().contains(point) {
         return Some(HitTarget::Search);
     }
     if layout.sidebar.contains(point) {
-        let offsets = [42.0, 76.0, 110.0, 144.0, 216.0];
+        let offsets = [42.0, 76.0, 110.0, 144.0];
         for (index, offset) in offsets.iter().enumerate() {
             let row = Rect::new(
                 layout.sidebar.origin.x + 8.0,
@@ -1122,11 +1193,7 @@ fn grid_column_count(content: Rect) -> usize {
 }
 
 fn layout_path(path: &Path) -> String {
-    if path == Path::new("/") {
-        "mochiOS".to_owned()
-    } else {
-        path.display().to_string()
-    }
+    path.display().to_string()
 }
 
 #[cfg(test)]
@@ -1139,7 +1206,6 @@ mod tests {
         assert!(SvgData::decode(APPLICATION_SVG).is_ok());
         assert!(SvgData::decode(FOLDER_SVG).is_ok());
         assert!(SvgData::decode(FILE_SVG).is_ok());
-        assert!(SvgData::decode(DISK_SVG).is_ok());
     }
 
     #[test]
