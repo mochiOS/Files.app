@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::browser::{Browser, EntryKind, ViewMode};
+use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
 use viewkit::draw_command::DrawCommand;
 use viewkit::event::{EventContext, EventResult, ViewEvent};
@@ -16,6 +16,7 @@ use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
 const FOLDER_SVG: &[u8] = include_bytes!("../resources/icons/folder.svg");
 const FILE_SVG: &[u8] = include_bytes!("../resources/icons/file.svg");
 const DISK_SVG: &[u8] = include_bytes!("../resources/icons/disk.svg");
+const APPLICATION_SVG: &[u8] = include_bytes!("../resources/icons/application.svg");
 
 const TOOLBAR_HEIGHT: f32 = 54.0;
 const STATUS_HEIGHT: f32 = 28.0;
@@ -38,7 +39,7 @@ const SEARCH_BACKGROUND: Color = Color::from_rgb_hex(0xe2e2e2);
 const DISABLED: Color = Color::from_rgb_hex(0xa7a7a7);
 
 const SIDEBAR_ITEMS: [SidebarItem; 5] = [
-    SidebarItem::new("Applications", "/applications", SidebarIcon::Folder),
+    SidebarItem::new("Applications", "/applications", SidebarIcon::Application),
     SidebarItem::new("System", "/system", SidebarIcon::Folder),
     SidebarItem::new("Libraries", "/libraries", SidebarIcon::Folder),
     SidebarItem::new("Temporary", "/tmp", SidebarIcon::Folder),
@@ -47,6 +48,7 @@ const SIDEBAR_ITEMS: [SidebarItem; 5] = [
 
 #[derive(Clone, Copy)]
 enum SidebarIcon {
+    Application,
     Folder,
     Disk,
 }
@@ -65,6 +67,7 @@ impl SidebarItem {
 }
 
 struct FileIcons {
+    application: Option<SvgData>,
     folder: Option<SvgData>,
     file: Option<SvgData>,
     disk: Option<SvgData>,
@@ -73,15 +76,20 @@ struct FileIcons {
 impl FileIcons {
     fn new() -> Self {
         Self {
+            application: SvgData::decode(APPLICATION_SVG).ok(),
             folder: SvgData::decode(FOLDER_SVG).ok(),
             file: SvgData::decode(FILE_SVG).ok(),
             disk: SvgData::decode(DISK_SVG).ok(),
         }
     }
 
-    fn entry(&self, kind: EntryKind) -> Option<&SvgData> {
-        match kind {
-            EntryKind::Directory | EntryKind::Application => self.folder.as_ref(),
+    fn entry(&self, entry: &FileEntry) -> Option<&SvgData> {
+        if uses_application_icon(entry) {
+            return self.application.as_ref();
+        }
+        match entry.kind {
+            EntryKind::Directory => self.folder.as_ref(),
+            EntryKind::Application => self.application.as_ref(),
             EntryKind::Image | EntryKind::Archive | EntryKind::Document | EntryKind::File => {
                 self.file.as_ref()
             }
@@ -90,10 +98,15 @@ impl FileIcons {
 
     fn sidebar(&self, icon: SidebarIcon) -> Option<&SvgData> {
         match icon {
+            SidebarIcon::Application => self.application.as_ref(),
             SidebarIcon::Folder => self.folder.as_ref(),
             SidebarIcon::Disk => self.disk.as_ref(),
         }
     }
+}
+
+fn uses_application_icon(entry: &FileEntry) -> bool {
+    entry.kind == EntryKind::Application || entry.path == Path::new("/applications")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -748,7 +761,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
             TEXT_SECONDARY
         };
         let cols = list_columns(row);
-        if let Some(icon) = state.icons.entry(entry.kind) {
+        if let Some(icon) = state.icons.entry(entry) {
             Svg::new(icon.clone()).paint(
                 Rect::new(cols[0].origin.x + 1.0, cols[0].origin.y + 5.0, 18.0, 18.0),
                 context,
@@ -834,7 +847,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                     context,
                 );
         }
-        if let Some(icon) = state.icons.entry(entry.kind) {
+        if let Some(icon) = state.icons.entry(entry) {
             Svg::new(icon.clone()).paint(
                 Rect::new(cell.origin.x + 27.0, cell.origin.y + 8.0, 64.0, 64.0),
                 context,
@@ -1123,8 +1136,30 @@ mod tests {
     #[test]
     fn supplied_file_icons_decode() {
         assert!(SvgData::decode(include_bytes!("../appicon.svg")).is_ok());
+        assert!(SvgData::decode(APPLICATION_SVG).is_ok());
         assert!(SvgData::decode(FOLDER_SVG).is_ok());
         assert!(SvgData::decode(FILE_SVG).is_ok());
         assert!(SvgData::decode(DISK_SVG).is_ok());
+    }
+
+    #[test]
+    fn applications_use_application_icon() {
+        let applications = FileEntry {
+            path: PathBuf::from("/applications"),
+            name: "applications".to_owned(),
+            kind: EntryKind::Directory,
+            size: 0,
+            modified: String::new(),
+        };
+        let app_bundle = FileEntry {
+            path: PathBuf::from("/applications/Files.app"),
+            name: "Files.app".to_owned(),
+            kind: EntryKind::Application,
+            size: 0,
+            modified: String::new(),
+        };
+
+        assert!(uses_application_icon(&applications));
+        assert!(uses_application_icon(&app_bundle));
     }
 }
