@@ -1122,6 +1122,7 @@ mod tests {
 
     #[test]
     fn supplied_file_icons_decode() {
+        assert!(SvgData::decode(include_bytes!("../appicon.svg")).is_ok());
         assert!(SvgData::decode(FOLDER_SVG).is_ok());
         assert!(SvgData::decode(FILE_SVG).is_ok());
         assert!(SvgData::decode(DISK_SVG).is_ok());
