@@ -1,0 +1,17 @@
+name = "Files"
+bundle_id = "org.mochios.files"
+version = "0.1.0"
+developer = "mochiOS"
+entry = "entry.elf"
+description = "File manager"
+icon = "appicon.svg"
+
+resources = [
+    "appicon.svg",
+    "icons/folder.svg",
+    "icons/file.svg",
+    "icons/application.svg",
+    "icons/image.svg",
+    "icons/archive.svg",
+    "icons/disk.svg",
+]

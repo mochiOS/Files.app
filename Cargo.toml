@@ -1,6 +1,23 @@
+[workspace]
+
 [package]
 name = "files"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
+viewkit = { git = "https://github.com/mochiOS/viewkit", package = "viewkit" }
+
+[target.'cfg(target_os = "mochios")'.dependencies]
+libc = { git = "https://github.com/mochiOS/libc", package = "libc" }
+
+[[bin]]
+name = "files"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
