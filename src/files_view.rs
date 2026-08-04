@@ -169,9 +169,13 @@ pub(crate) struct FilesView {
 
 impl FilesView {
     pub(crate) fn new() -> Self {
+        let initial_directory = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| PathBuf::from("/"));
         Self {
             state: RefCell::new(FilesState {
-                browser: Browser::new("/"),
+                browser: Browser::new(initial_directory),
                 icons: FileIcons::new(),
                 scroll: 0.0,
                 hover: None,
