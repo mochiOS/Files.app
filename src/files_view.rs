@@ -9,7 +9,7 @@ use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventRes
 use viewkit::geometry::{Point, Rect, Size};
 use viewkit::platform::{CursorIcon, Key, PointerButton};
 use viewkit::prelude::SvgData;
-use viewkit::theme::Color;
+use viewkit::theme::{Color, Theme};
 use viewkit::typography::TextAlignment;
 use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
 
@@ -32,17 +32,9 @@ const CONTEXT_COMMAND_DELETE: u32 = 5;
 const CONTEXT_COMMAND_CONFIRM_DELETE: u32 = 6;
 const CONTEXT_COMMAND_CANCEL_DELETE: u32 = 7;
 
-const WINDOW_BACKGROUND: Color = Color::from_rgb_hex(0xf8f8f8);
-const TOOLBAR_BACKGROUND: Color = Color::from_rgb_hex(0xf2f2f2);
-const SIDEBAR_BACKGROUND: Color = Color::from_rgb_hex(0xe9e9e9);
-const CONTENT_BACKGROUND: Color = Color::WHITE;
-const BORDER: Color = Color::from_rgb_hex(0xd0d0d0);
-const TEXT_PRIMARY: Color = Color::from_rgb_hex(0x252525);
-const TEXT_SECONDARY: Color = Color::from_rgb_hex(0x707070);
-const ROW_HOVER: Color = Color::from_rgb_hex(0xf0f5fa);
-const SELECTION: Color = Color::from_rgb_hex(0x3478d4);
-const SEARCH_BACKGROUND: Color = Color::from_rgb_hex(0xe2e2e2);
-const DISABLED: Color = Color::from_rgb_hex(0xa7a7a7);
+fn colors() -> viewkit::theme::BrowserTokens {
+    Theme::current().browser
+}
 
 const SIDEBAR_ITEMS: [SidebarItem; 4] = [
     SidebarItem::new("Applications", "/applications", SidebarIcon::Application),
@@ -271,7 +263,7 @@ impl View for FilesView {
         let state = self.state.borrow();
 
         Rectangle::new()
-            .color(RectangleColor::Custom(WINDOW_BACKGROUND))
+            .color(RectangleColor::Custom(colors().window_background))
             .paint(bounds, context);
         paint_toolbar(&layout, &state, context);
         paint_sidebar(&layout, &state, context);
@@ -802,7 +794,7 @@ impl Layout {
 
 fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     Rectangle::new()
-        .color(RectangleColor::Custom(TOOLBAR_BACKGROUND))
+        .color(RectangleColor::Custom(colors().toolbar_background))
         .paint(layout.toolbar, context);
     stroke_bottom(layout.toolbar, context);
 
@@ -830,9 +822,9 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
     let path = layout.path();
     Rectangle::new()
         .color(RectangleColor::Custom(if state.path_focused {
-            Color::WHITE
+            colors().field_focused
         } else {
-            SEARCH_BACKGROUND
+            colors().field_background
         }))
         .radius(viewkit::theme::CornerRadius::Custom(6.0))
         .paint(path, context);
@@ -845,7 +837,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
                 path.size.height - 1.0,
             ),
             radius: 5.5,
-            color: SELECTION,
+            color: colors().selection,
             width: 1.0,
         });
     }
@@ -863,7 +855,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         ),
         13.0,
         400,
-        TEXT_PRIMARY,
+        colors().text_primary,
         TextAlignment::Start,
         context,
     );
@@ -887,9 +879,9 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
     let search = layout.search();
     Rectangle::new()
         .color(RectangleColor::Custom(if state.search_focused {
-            Color::WHITE
+            colors().field_focused
         } else {
-            SEARCH_BACKGROUND
+            colors().field_background
         }))
         .radius(viewkit::theme::CornerRadius::Custom(6.0))
         .paint(search, context);
@@ -902,13 +894,13 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
                 search.size.height - 1.0,
             ),
             radius: 5.5,
-            color: SELECTION,
+            color: colors().selection,
             width: 1.0,
         });
     }
     Icon::new(IconName::Search)
         .size(14.0)
-        .color(TEXT_SECONDARY)
+        .color(colors().text_secondary)
         .paint(
             Rect::new(search.origin.x + 8.0, search.origin.y + 8.0, 14.0, 14.0),
             context,
@@ -929,9 +921,9 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         13.0,
         400,
         if state.browser.search().is_empty() {
-            TEXT_SECONDARY
+            colors().text_secondary
         } else {
-            TEXT_PRIMARY
+            colors().text_primary
         },
         TextAlignment::Start,
         context,
@@ -940,7 +932,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
 
 fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     Rectangle::new()
-        .color(RectangleColor::Custom(SIDEBAR_BACKGROUND))
+        .color(RectangleColor::Custom(colors().sidebar_background))
         .paint(layout.sidebar, context);
     context.display_list.push(DrawCommand::StrokeRect {
         rect: Rect::new(
@@ -949,7 +941,7 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             1.0,
             layout.sidebar.size.height,
         ),
-        color: BORDER,
+        color: colors().border,
         width: 1.0,
     });
 
@@ -963,7 +955,7 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         ),
         11.0,
         600,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::Start,
         context,
     );
@@ -998,9 +990,9 @@ fn paint_sidebar_item(
     if selected || hovered {
         Rectangle::new()
             .color(RectangleColor::Custom(if selected {
-                Color::from_rgb_hex(0xd0d0d0)
+                colors().sidebar_selection
             } else {
-                Color::from_rgb_hex(0xdfdfdf)
+                colors().sidebar_hover
             }))
             .radius(viewkit::theme::CornerRadius::Custom(5.0))
             .paint(bounds, context);
@@ -1021,7 +1013,7 @@ fn paint_sidebar_item(
         ),
         13.0,
         if selected { 500 } else { 400 },
-        TEXT_PRIMARY,
+        colors().text_primary,
         TextAlignment::Start,
         context,
     );
@@ -1029,7 +1021,7 @@ fn paint_sidebar_item(
 
 fn paint_content(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     Rectangle::new()
-        .color(RectangleColor::Custom(CONTENT_BACKGROUND))
+        .color(RectangleColor::Custom(colors().content_background))
         .paint(layout.content, context);
     context.display_list.push(DrawCommand::PushClip {
         rect: layout.content,
@@ -1049,7 +1041,7 @@ fn paint_content(layout: &Layout, state: &FilesState, context: &mut PaintContext
             ),
             14.0,
             400,
-            TEXT_SECONDARY,
+            colors().text_secondary,
             TextAlignment::Center,
             context,
         );
@@ -1065,7 +1057,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         LIST_HEADER_HEIGHT,
     );
     Rectangle::new()
-        .color(RectangleColor::Custom(Color::from_rgb_hex(0xf7f7f7)))
+        .color(RectangleColor::Custom(colors().list_header))
         .paint(header, context);
     stroke_bottom(header, context);
     let columns = list_columns(layout.content);
@@ -1074,7 +1066,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         columns[0],
         11.0,
         600,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::Start,
         context,
     );
@@ -1083,7 +1075,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         columns[1],
         11.0,
         600,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::Start,
         context,
     );
@@ -1092,7 +1084,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         columns[2],
         11.0,
         600,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::End,
         context,
     );
@@ -1101,7 +1093,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         columns[3],
         11.0,
         600,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::Start,
         context,
     );
@@ -1126,17 +1118,21 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         if selected || hovered {
             Rectangle::new()
                 .color(RectangleColor::Custom(if selected {
-                    SELECTION
+                    colors().selection
                 } else {
-                    ROW_HOVER
+                    colors().row_hover
                 }))
                 .paint(row, context);
         }
-        let text_color = if selected { Color::WHITE } else { TEXT_PRIMARY };
-        let secondary = if selected {
-            Color::WHITE
+        let text_color = if selected {
+            colors().on_selection
         } else {
-            TEXT_SECONDARY
+            colors().text_primary
+        };
+        let secondary = if selected {
+            colors().on_selection
+        } else {
+            colors().text_secondary
         };
         let cols = list_columns(row);
         if let Some(icon) = state.icons.entry(entry) {
@@ -1213,7 +1209,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         let hovered = state.hover == Some(HitTarget::Entry(index));
         if hovered {
             Rectangle::new()
-                .color(RectangleColor::Custom(ROW_HOVER))
+                .color(RectangleColor::Custom(colors().row_hover))
                 .radius(viewkit::theme::CornerRadius::Custom(6.0))
                 .paint(
                     Rect::new(
@@ -1239,7 +1235,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         );
         if selected {
             Rectangle::new()
-                .color(RectangleColor::Custom(SELECTION))
+                .color(RectangleColor::Custom(colors().selection))
                 .radius(viewkit::theme::CornerRadius::Custom(4.0))
                 .paint(label, context);
         }
@@ -1248,7 +1244,11 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
             entry,
             label,
             12.0,
-            if selected { Color::WHITE } else { TEXT_PRIMARY },
+            if selected {
+                colors().on_selection
+            } else {
+                colors().text_primary
+            },
             TextAlignment::Center,
             context,
         );
@@ -1270,7 +1270,7 @@ fn paint_editable_name(
         .filter(|edit| edit.path == entry.path)
     {
         Rectangle::new()
-            .color(RectangleColor::Custom(Color::WHITE))
+            .color(RectangleColor::Custom(colors().field_focused))
             .radius(viewkit::theme::CornerRadius::Custom(3.0))
             .paint(bounds, context);
         context.display_list.push(DrawCommand::StrokeRoundedRect {
@@ -1281,7 +1281,7 @@ fn paint_editable_name(
                 (bounds.size.height - 1.0).max(0.0),
             ),
             radius: 2.5,
-            color: SELECTION,
+            color: colors().selection,
             width: 1.0,
         });
         paint_text(
@@ -1289,7 +1289,7 @@ fn paint_editable_name(
             bounds,
             size,
             400,
-            TEXT_PRIMARY,
+            colors().text_primary,
             alignment,
             context,
         );
@@ -1308,7 +1308,7 @@ fn paint_editable_name(
 
 fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     Rectangle::new()
-        .color(RectangleColor::Custom(TOOLBAR_BACKGROUND))
+        .color(RectangleColor::Custom(colors().toolbar_background))
         .paint(layout.status, context);
     context.display_list.push(DrawCommand::StrokeRect {
         rect: Rect::new(
@@ -1317,7 +1317,7 @@ fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<
             layout.status.size.width,
             1.0,
         ),
-        color: BORDER,
+        color: colors().border,
         width: 1.0,
     });
     let count = state.browser.entries().len();
@@ -1337,7 +1337,7 @@ fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<
         ),
         11.0,
         400,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::Start,
         context,
     );
@@ -1351,7 +1351,7 @@ fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<
         ),
         11.0,
         400,
-        TEXT_SECONDARY,
+        colors().text_secondary,
         TextAlignment::End,
         context,
     );
@@ -1366,13 +1366,17 @@ fn paint_icon_button(
 ) {
     if hovered && enabled {
         Rectangle::new()
-            .color(RectangleColor::Custom(Color::from_rgb_hex(0xe2e2e2)))
+            .color(RectangleColor::Custom(colors().control_hover))
             .radius(viewkit::theme::CornerRadius::Custom(5.0))
             .paint(bounds, context);
     }
     Icon::new(icon)
         .size(17.0)
-        .color(if enabled { TEXT_PRIMARY } else { DISABLED })
+        .color(if enabled {
+            colors().text_primary
+        } else {
+            colors().disabled
+        })
         .paint(
             Rect::new(bounds.origin.x + 6.5, bounds.origin.y + 7.5, 17.0, 17.0),
             context,
@@ -1389,17 +1393,20 @@ fn paint_mode_button(
     if selected || hovered {
         Rectangle::new()
             .color(RectangleColor::Custom(if selected {
-                Color::from_rgb_hex(0xd3d3d3)
+                colors().control_selection
             } else {
-                Color::from_rgb_hex(0xe5e5e5)
+                colors().control_selection_hover
             }))
             .radius(viewkit::theme::CornerRadius::Custom(4.0))
             .paint(bounds, context);
     }
-    Icon::new(icon).size(16.0).color(TEXT_PRIMARY).paint(
-        Rect::new(bounds.origin.x + 8.0, bounds.origin.y + 7.0, 16.0, 16.0),
-        context,
-    );
+    Icon::new(icon)
+        .size(16.0)
+        .color(colors().text_primary)
+        .paint(
+            Rect::new(bounds.origin.x + 8.0, bounds.origin.y + 7.0, 16.0, 16.0),
+            context,
+        );
 }
 
 fn paint_text(
@@ -1428,7 +1435,7 @@ fn stroke_bottom(bounds: Rect, context: &mut PaintContext<'_>) {
             bounds.size.width,
             1.0,
         ),
-        color: BORDER,
+        color: colors().border,
         width: 1.0,
     });
 }
