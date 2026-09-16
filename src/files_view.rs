@@ -760,36 +760,45 @@ impl Layout {
     }
 
     fn toolbar_button(&self, index: usize) -> Rect {
+        let control = Theme::current().layout.compact_control_height;
         Rect::new(
             self.bounds.origin.x + 13.0 + index as f32 * 35.0,
-            self.bounds.origin.y + 10.0,
-            30.0,
-            32.0,
+            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            control,
+            control,
         )
     }
 
     fn mode_button(&self, index: usize) -> Rect {
         let right = self.bounds.origin.x + self.bounds.size.width;
+        let control = Theme::current().layout.compact_control_height;
         Rect::new(
-            right - 294.0 + index as f32 * 32.0,
-            self.bounds.origin.y + 11.0,
-            32.0,
-            30.0,
+            right - 294.0 + index as f32 * control,
+            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            control,
+            control,
         )
     }
 
     fn path(&self) -> Rect {
+        let control = Theme::current().layout.compact_control_height;
         Rect::new(
             self.bounds.origin.x + 125.0,
-            self.bounds.origin.y + 11.0,
+            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
             (self.bounds.size.width - 429.0).max(80.0),
-            30.0,
+            control,
         )
     }
 
     fn search(&self) -> Rect {
         let right = self.bounds.origin.x + self.bounds.size.width;
-        Rect::new(right - 218.0, self.bounds.origin.y + 11.0, 202.0, 30.0)
+        let control = Theme::current().layout.compact_control_height;
+        Rect::new(
+            right - 218.0,
+            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            202.0,
+            control,
+        )
     }
 }
 
