@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
+use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
 use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
 use viewkit::draw_command::DrawCommand;
 use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventResult, ViewEvent};
@@ -10,7 +11,7 @@ use viewkit::geometry::{Point, Rect, Size};
 use viewkit::platform::{CursorIcon, Key, PointerButton};
 use viewkit::prelude::SvgData;
 use viewkit::theme::{Color, Theme};
-use viewkit::typography::TextAlignment;
+use viewkit::typography::{TextAlignment, TextRole};
 use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
 
 const FOLDER_SVG: &[u8] = include_bytes!("../resources/icons/folder.svg");
@@ -853,8 +854,8 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             path.size.width - 18.0,
             20.0,
         ),
-        13.0,
-        400,
+        TextRole::Label,
+        None,
         colors().text_primary,
         TextAlignment::Start,
         context,
@@ -918,8 +919,8 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             search.size.width - 36.0,
             20.0,
         ),
-        13.0,
-        400,
+        TextRole::Label,
+        None,
         if state.browser.search().is_empty() {
             colors().text_secondary
         } else {
@@ -953,8 +954,8 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             layout.sidebar_width - 30.0,
             18.0,
         ),
-        11.0,
-        600,
+        TextRole::Caption,
+        Some(600),
         colors().text_secondary,
         TextAlignment::Start,
         context,
@@ -987,6 +988,11 @@ fn paint_sidebar_item(
     );
     let selected = state.browser.current_dir() == Path::new(item.path);
     let hovered = state.hover == Some(HitTarget::Sidebar(index));
+    let mut node = AccessibilityNode::new(AccessibilityRole::ListItem, bounds);
+    node.label = Some(item.label.to_owned());
+    node.value = Some(item.path.to_owned());
+    node.selected = selected;
+    context.record_accessibility(node);
     if selected || hovered {
         Rectangle::new()
             .color(RectangleColor::Custom(if selected {
@@ -1011,8 +1017,8 @@ fn paint_sidebar_item(
             bounds.size.width - 40.0,
             21.0,
         ),
-        13.0,
-        if selected { 500 } else { 400 },
+        TextRole::Label,
+        selected.then_some(600),
         colors().text_primary,
         TextAlignment::Start,
         context,
@@ -1039,8 +1045,8 @@ fn paint_content(layout: &Layout, state: &FilesState, context: &mut PaintContext
                 layout.content.size.width - 56.0,
                 44.0,
             ),
-            14.0,
-            400,
+            TextRole::Body,
+            None,
             colors().text_secondary,
             TextAlignment::Center,
             context,
@@ -1064,8 +1070,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     paint_text(
         "Name",
         columns[0],
-        11.0,
-        600,
+        TextRole::Caption,
+        Some(600),
         colors().text_secondary,
         TextAlignment::Start,
         context,
@@ -1073,8 +1079,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     paint_text(
         "Date Modified",
         columns[1],
-        11.0,
-        600,
+        TextRole::Caption,
+        Some(600),
         colors().text_secondary,
         TextAlignment::Start,
         context,
@@ -1082,8 +1088,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     paint_text(
         "Size",
         columns[2],
-        11.0,
-        600,
+        TextRole::Caption,
+        Some(600),
         colors().text_secondary,
         TextAlignment::End,
         context,
@@ -1091,8 +1097,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     paint_text(
         "Kind",
         columns[3],
-        11.0,
-        600,
+        TextRole::Caption,
+        Some(600),
         colors().text_secondary,
         TextAlignment::Start,
         context,
@@ -1115,6 +1121,11 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         }
         let selected = state.browser.selected() == Some(entry.path.as_path());
         let hovered = state.hover == Some(HitTarget::Entry(index));
+        let mut node = AccessibilityNode::new(AccessibilityRole::ListItem, row);
+        node.label = Some(entry.name.clone());
+        node.value = Some(entry.kind.label().to_owned());
+        node.selected = selected;
+        context.record_accessibility(node);
         if selected || hovered {
             Rectangle::new()
                 .color(RectangleColor::Custom(if selected {
@@ -1150,7 +1161,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                 cols[0].size.width - 24.0,
                 cols[0].size.height,
             ),
-            13.0,
+            TextRole::Label,
             text_color,
             TextAlignment::Start,
             context,
@@ -1158,8 +1169,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         paint_text(
             entry.modified.clone(),
             cols[1],
-            12.0,
-            400,
+            TextRole::Caption,
+            None,
             secondary,
             TextAlignment::Start,
             context,
@@ -1167,8 +1178,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         paint_text(
             entry.size_label(),
             cols[2],
-            12.0,
-            400,
+            TextRole::Caption,
+            None,
             secondary,
             TextAlignment::End,
             context,
@@ -1176,8 +1187,8 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         paint_text(
             entry.kind.label(),
             cols[3],
-            12.0,
-            400,
+            TextRole::Caption,
+            None,
             secondary,
             TextAlignment::Start,
             context,
@@ -1207,6 +1218,11 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         }
         let selected = state.browser.selected() == Some(entry.path.as_path());
         let hovered = state.hover == Some(HitTarget::Entry(index));
+        let mut node = AccessibilityNode::new(AccessibilityRole::ListItem, cell);
+        node.label = Some(entry.name.clone());
+        node.value = Some(entry.kind.label().to_owned());
+        node.selected = selected;
+        context.record_accessibility(node);
         if hovered {
             Rectangle::new()
                 .color(RectangleColor::Custom(colors().row_hover))
@@ -1243,7 +1259,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
             state,
             entry,
             label,
-            12.0,
+            TextRole::Caption,
             if selected {
                 colors().on_selection
             } else {
@@ -1259,7 +1275,7 @@ fn paint_editable_name(
     state: &FilesState,
     entry: &FileEntry,
     bounds: Rect,
-    size: f32,
+    role: TextRole,
     color: Color,
     alignment: TextAlignment,
     context: &mut PaintContext<'_>,
@@ -1287,8 +1303,8 @@ fn paint_editable_name(
         paint_text(
             format!("{}|", edit.value),
             bounds,
-            size,
-            400,
+            role,
+            None,
             colors().text_primary,
             alignment,
             context,
@@ -1297,8 +1313,8 @@ fn paint_editable_name(
         paint_text(
             entry.name.clone(),
             bounds,
-            size,
-            400,
+            role,
+            None,
             color,
             alignment,
             context,
@@ -1335,8 +1351,8 @@ fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<
             180.0,
             18.0,
         ),
-        11.0,
-        400,
+        TextRole::Caption,
+        None,
         colors().text_secondary,
         TextAlignment::Start,
         context,
@@ -1349,8 +1365,8 @@ fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<
             layout.status.size.width - layout.sidebar_width - 214.0,
             18.0,
         ),
-        11.0,
-        400,
+        TextRole::Caption,
+        None,
         colors().text_secondary,
         TextAlignment::End,
         context,
@@ -1412,19 +1428,21 @@ fn paint_mode_button(
 fn paint_text(
     value: impl Into<String>,
     bounds: Rect,
-    size: f32,
-    weight: u16,
+    role: TextRole,
+    weight: Option<u16>,
     color: Color,
     alignment: TextAlignment,
     context: &mut PaintContext<'_>,
 ) {
-    Text::new(value)
-        .font_size(size)
-        .line_height(bounds.size.height.max(size))
-        .weight(weight)
+    let style = context.typography.style(role);
+    let mut text = Text::styled(value, role)
+        .line_height(bounds.size.height.max(style.line_height))
         .color(color)
-        .alignment(alignment)
-        .paint(bounds, context);
+        .alignment(alignment);
+    if let Some(weight) = weight {
+        text = text.weight(weight);
+    }
+    text.paint(bounds, context);
 }
 
 fn stroke_bottom(bounds: Rect, context: &mut PaintContext<'_>) {
