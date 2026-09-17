@@ -1,6 +1,7 @@
 format = 1
 
 [package]
+provenance = "built-in"
 id = "org.mochios.files"
 name = "Files"
 version = "0.1.0"
