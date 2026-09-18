@@ -18,12 +18,6 @@ const FOLDER_SVG: &[u8] = include_bytes!("../resources/icons/folder.svg");
 const FILE_SVG: &[u8] = include_bytes!("../resources/icons/file.svg");
 const APPLICATION_SVG: &[u8] = include_bytes!("../resources/icons/application.svg");
 
-const TOOLBAR_HEIGHT: f32 = 54.0;
-const STATUS_HEIGHT: f32 = 28.0;
-const LIST_HEADER_HEIGHT: f32 = 30.0;
-const LIST_ROW_HEIGHT: f32 = 29.0;
-const GRID_CELL_WIDTH: f32 = 118.0;
-const GRID_CELL_HEIGHT: f32 = 112.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const CONTEXT_COMMAND_OPEN: u32 = 1;
 const CONTEXT_COMMAND_RELOAD: u32 = 2;
@@ -728,32 +722,32 @@ impl Layout {
         } else {
             212.0
         };
-        let content_height = (bounds.size.height - TOOLBAR_HEIGHT - STATUS_HEIGHT).max(0.0);
+        let content_height = (bounds.size.height - Theme::current().layout.top_bar_height - Theme::current().layout.status_bar_height).max(0.0);
         Self {
             bounds,
             toolbar: Rect::new(
                 bounds.origin.x,
                 bounds.origin.y,
                 bounds.size.width,
-                TOOLBAR_HEIGHT,
+                Theme::current().layout.top_bar_height,
             ),
             sidebar: Rect::new(
                 bounds.origin.x,
-                bounds.origin.y + TOOLBAR_HEIGHT,
+                bounds.origin.y + Theme::current().layout.top_bar_height,
                 sidebar_width,
                 content_height,
             ),
             content: Rect::new(
                 bounds.origin.x + sidebar_width,
-                bounds.origin.y + TOOLBAR_HEIGHT,
+                bounds.origin.y + Theme::current().layout.top_bar_height,
                 (bounds.size.width - sidebar_width).max(0.0),
                 content_height,
             ),
             status: Rect::new(
                 bounds.origin.x,
-                bounds.origin.y + bounds.size.height - STATUS_HEIGHT,
+                bounds.origin.y + bounds.size.height - Theme::current().layout.status_bar_height,
                 bounds.size.width,
-                STATUS_HEIGHT,
+                Theme::current().layout.status_bar_height,
             ),
             sidebar_width,
         }
@@ -763,7 +757,7 @@ impl Layout {
         let control = Theme::current().layout.compact_control_height;
         Rect::new(
             self.bounds.origin.x + 13.0 + index as f32 * 35.0,
-            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            self.bounds.origin.y + (Theme::current().layout.top_bar_height - control) / 2.0,
             control,
             control,
         )
@@ -774,7 +768,7 @@ impl Layout {
         let control = Theme::current().layout.compact_control_height;
         Rect::new(
             right - 294.0 + index as f32 * control,
-            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            self.bounds.origin.y + (Theme::current().layout.top_bar_height - control) / 2.0,
             control,
             control,
         )
@@ -784,7 +778,7 @@ impl Layout {
         let control = Theme::current().layout.compact_control_height;
         Rect::new(
             self.bounds.origin.x + 125.0,
-            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            self.bounds.origin.y + (Theme::current().layout.top_bar_height - control) / 2.0,
             (self.bounds.size.width - 429.0).max(80.0),
             control,
         )
@@ -795,7 +789,7 @@ impl Layout {
         let control = Theme::current().layout.compact_control_height;
         Rect::new(
             right - 218.0,
-            self.bounds.origin.y + (TOOLBAR_HEIGHT - control) / 2.0,
+            self.bounds.origin.y + (Theme::current().layout.top_bar_height - control) / 2.0,
             202.0,
             control,
         )
@@ -836,7 +830,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         } else {
             colors().field_background
         }))
-        .radius(viewkit::theme::CornerRadius::Custom(6.0))
+        .radius(viewkit::theme::CornerRadius::Small)
         .paint(path, context);
     if state.path_focused {
         context.display_list.push(DrawCommand::StrokeRoundedRect {
@@ -893,7 +887,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         } else {
             colors().field_background
         }))
-        .radius(viewkit::theme::CornerRadius::Custom(6.0))
+        .radius(viewkit::theme::CornerRadius::Small)
         .paint(search, context);
     if state.search_focused {
         context.display_list.push(DrawCommand::StrokeRoundedRect {
@@ -1009,7 +1003,7 @@ fn paint_sidebar_item(
             } else {
                 colors().sidebar_hover
             }))
-            .radius(viewkit::theme::CornerRadius::Custom(5.0))
+            .radius(viewkit::theme::CornerRadius::Small)
             .paint(bounds, context);
     }
     if let Some(icon) = state.icons.sidebar(item.icon) {
@@ -1069,7 +1063,7 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         layout.content.origin.x,
         layout.content.origin.y,
         layout.content.size.width,
-        LIST_HEADER_HEIGHT,
+        Theme::current().layout.compact_control_height,
     );
     Rectangle::new()
         .color(RectangleColor::Custom(colors().list_header))
@@ -1115,13 +1109,13 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
 
     let entries = state.browser.entries();
     for (index, entry) in entries.iter().enumerate() {
-        let y = layout.content.origin.y + LIST_HEADER_HEIGHT + index as f32 * LIST_ROW_HEIGHT
+        let y = layout.content.origin.y + Theme::current().layout.compact_control_height + index as f32 * Theme::current().layout.control_height
             - state.scroll;
         let row = Rect::new(
             layout.content.origin.x,
             y,
             layout.content.size.width,
-            LIST_ROW_HEIGHT,
+            Theme::current().layout.control_height,
         );
         if row.origin.y + row.size.height <= header.origin.y + header.size.height
             || row.origin.y >= layout.status.origin.y
@@ -1208,17 +1202,17 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
 
 fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     let columns = grid_column_count(layout.content);
-    let content_width = columns as f32 * GRID_CELL_WIDTH;
+    let content_width = columns as f32 * Theme::current().layout.browser_grid_cell_width;
     let left =
         layout.content.origin.x + ((layout.content.size.width - content_width) / 2.0).max(12.0);
     for (index, entry) in state.browser.entries().iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
         let cell = Rect::new(
-            left + column as f32 * GRID_CELL_WIDTH,
-            layout.content.origin.y + 16.0 + row as f32 * GRID_CELL_HEIGHT - state.scroll,
-            GRID_CELL_WIDTH,
-            GRID_CELL_HEIGHT,
+            left + column as f32 * Theme::current().layout.browser_grid_cell_width,
+            layout.content.origin.y + 16.0 + row as f32 * Theme::current().layout.browser_grid_cell_height - state.scroll,
+            Theme::current().layout.browser_grid_cell_width,
+            Theme::current().layout.browser_grid_cell_height,
         );
         if cell.origin.y + cell.size.height <= layout.content.origin.y
             || cell.origin.y >= layout.status.origin.y
@@ -1235,7 +1229,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         if hovered {
             Rectangle::new()
                 .color(RectangleColor::Custom(colors().row_hover))
-                .radius(viewkit::theme::CornerRadius::Custom(6.0))
+                .radius(viewkit::theme::CornerRadius::Small)
                 .paint(
                     Rect::new(
                         cell.origin.x + 5.0,
@@ -1261,7 +1255,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
         if selected {
             Rectangle::new()
                 .color(RectangleColor::Custom(colors().selection))
-                .radius(viewkit::theme::CornerRadius::Custom(4.0))
+                .radius(viewkit::theme::CornerRadius::Small)
                 .paint(label, context);
         }
         paint_editable_name(
@@ -1296,7 +1290,7 @@ fn paint_editable_name(
     {
         Rectangle::new()
             .color(RectangleColor::Custom(colors().field_focused))
-            .radius(viewkit::theme::CornerRadius::Custom(3.0))
+            .radius(viewkit::theme::CornerRadius::Small)
             .paint(bounds, context);
         context.display_list.push(DrawCommand::StrokeRoundedRect {
             rect: Rect::new(
@@ -1392,18 +1386,24 @@ fn paint_icon_button(
     if hovered && enabled {
         Rectangle::new()
             .color(RectangleColor::Custom(colors().control_hover))
-            .radius(viewkit::theme::CornerRadius::Custom(5.0))
+            .radius(viewkit::theme::CornerRadius::Small)
             .paint(bounds, context);
     }
+    let icon_size = context.theme.layout.stepper_icon_size;
     Icon::new(icon)
-        .size(17.0)
+        .size(icon_size)
         .color(if enabled {
             colors().text_primary
         } else {
             colors().disabled
         })
         .paint(
-            Rect::new(bounds.origin.x + 6.5, bounds.origin.y + 7.5, 17.0, 17.0),
+            Rect::new(
+                bounds.origin.x + (bounds.size.width - icon_size) / 2.0,
+                bounds.origin.y + (bounds.size.height - icon_size) / 2.0,
+                icon_size,
+                icon_size,
+            ),
             context,
         );
 }
@@ -1422,14 +1422,20 @@ fn paint_mode_button(
             } else {
                 colors().control_selection_hover
             }))
-            .radius(viewkit::theme::CornerRadius::Custom(4.0))
+            .radius(viewkit::theme::CornerRadius::Small)
             .paint(bounds, context);
     }
+    let icon_size = context.theme.layout.compact_icon_size;
     Icon::new(icon)
-        .size(16.0)
+        .size(icon_size)
         .color(colors().text_primary)
         .paint(
-            Rect::new(bounds.origin.x + 8.0, bounds.origin.y + 7.0, 16.0, 16.0),
+            Rect::new(
+                bounds.origin.x + (bounds.size.width - icon_size) / 2.0,
+                bounds.origin.y + (bounds.size.height - icon_size) / 2.0,
+                icon_size,
+                icon_size,
+            ),
             context,
         );
 }
@@ -1468,34 +1474,43 @@ fn stroke_bottom(bounds: Rect, context: &mut PaintContext<'_>) {
 }
 
 fn list_columns(bounds: Rect) -> [Rect; 4] {
+    let theme = Theme::current();
+    let spacing = theme.spacing;
     let width = bounds.size.width;
-    let name = (width * 0.44).max(180.0).min(width);
-    let modified = (width * 0.23).max(120.0).min((width - name).max(0.0));
-    let size = 100.0_f32.min((width - name - modified).max(0.0));
+    let name = (width / 2.0)
+        .max(theme.layout.navigation_sidebar_width)
+        .min(width);
+    let modified = (width / 4.0)
+        .max(theme.layout.control_min_width)
+        .min((width - name).max(0.0));
+    let size = theme
+        .layout
+        .control_min_width
+        .min((width - name - modified).max(0.0));
     [
         Rect::new(
-            bounds.origin.x + 10.0,
-            bounds.origin.y + 5.0,
-            (name - 16.0).max(0.0),
-            bounds.size.height - 8.0,
+            bounds.origin.x + spacing.medium,
+            bounds.origin.y + spacing.extra_small,
+            (name - spacing.large).max(0.0),
+            bounds.size.height - spacing.small,
         ),
         Rect::new(
             bounds.origin.x + name,
-            bounds.origin.y + 5.0,
-            (modified - 10.0).max(0.0),
-            bounds.size.height - 8.0,
+            bounds.origin.y + spacing.extra_small,
+            (modified - spacing.medium).max(0.0),
+            bounds.size.height - spacing.small,
         ),
         Rect::new(
             bounds.origin.x + name + modified,
-            bounds.origin.y + 5.0,
-            (size - 14.0).max(0.0),
-            bounds.size.height - 8.0,
+            bounds.origin.y + spacing.extra_small,
+            (size - spacing.large).max(0.0),
+            bounds.size.height - spacing.small,
         ),
         Rect::new(
-            bounds.origin.x + name + modified + size + 12.0,
-            bounds.origin.y + 5.0,
-            (width - name - modified - size - 20.0).max(0.0),
-            bounds.size.height - 8.0,
+            bounds.origin.x + name + modified + size + spacing.medium,
+            bounds.origin.y + spacing.extra_small,
+            (width - name - modified - size - spacing.extra_large).max(0.0),
+            bounds.size.height - spacing.small,
         ),
     ]
 }
@@ -1544,18 +1559,18 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
         let index = match state.browser.view_mode() {
             ViewMode::List => {
                 let relative =
-                    point.y - layout.content.origin.y - LIST_HEADER_HEIGHT + state.scroll;
-                (relative >= 0.0).then_some((relative / LIST_ROW_HEIGHT) as usize)
+                    point.y - layout.content.origin.y - Theme::current().layout.compact_control_height + state.scroll;
+                (relative >= 0.0).then_some((relative / Theme::current().layout.control_height) as usize)
             }
             ViewMode::Grid => {
                 let columns = grid_column_count(layout.content);
-                let content_width = columns as f32 * GRID_CELL_WIDTH;
+                let content_width = columns as f32 * Theme::current().layout.browser_grid_cell_width;
                 let left = layout.content.origin.x
                     + ((layout.content.size.width - content_width) / 2.0).max(12.0);
                 let x = point.x - left;
                 let y = point.y - layout.content.origin.y - 16.0 + state.scroll;
                 if x >= 0.0 && y >= 0.0 {
-                    Some((y / GRID_CELL_HEIGHT) as usize * columns + (x / GRID_CELL_WIDTH) as usize)
+                    Some((y / Theme::current().layout.browser_grid_cell_height) as usize * columns + (x / Theme::current().layout.browser_grid_cell_width) as usize)
                 } else {
                     None
                 }
@@ -1574,17 +1589,17 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
 fn maximum_scroll(layout: &Layout, state: &FilesState) -> f32 {
     let count = state.browser.entries().len();
     let content_height = match state.browser.view_mode() {
-        ViewMode::List => LIST_HEADER_HEIGHT + count as f32 * LIST_ROW_HEIGHT,
+        ViewMode::List => Theme::current().layout.compact_control_height + count as f32 * Theme::current().layout.control_height,
         ViewMode::Grid => {
             let columns = grid_column_count(layout.content);
-            24.0 + count.div_ceil(columns) as f32 * GRID_CELL_HEIGHT
+            24.0 + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
         }
     };
     (content_height - layout.content.size.height).max(0.0)
 }
 
 fn grid_column_count(content: Rect) -> usize {
-    (content.size.width / GRID_CELL_WIDTH).floor().max(1.0) as usize
+    (content.size.width / Theme::current().layout.browser_grid_cell_width).floor().max(1.0) as usize
 }
 
 fn layout_path(path: &Path) -> String {
