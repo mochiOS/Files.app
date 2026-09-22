@@ -62,6 +62,7 @@ impl FileEntry {
 #[derive(Debug)]
 pub(crate) struct Browser {
     current_dir: PathBuf,
+    preview_root: Option<PathBuf>,
     entries: Vec<FileEntry>,
     history: Vec<PathBuf>,
     history_index: usize,
@@ -73,9 +74,19 @@ pub(crate) struct Browser {
 
 impl Browser {
     pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
+        let preview_root = std::env::var_os("MOCHIOS_PREVIEW_ROOT")
+            .and_then(|root| fs::canonicalize(root).ok())
+            .filter(|root| root.is_dir());
+        let mut path = path.into();
+        if let Some(root) = &preview_root {
+            path = fs::canonicalize(&path)
+                .ok()
+                .filter(|path| path.starts_with(root))
+                .unwrap_or_else(|| root.clone());
+        }
         let mut browser = Self {
             current_dir: path.clone(),
+            preview_root,
             entries: Vec::new(),
             history: vec![path],
             history_index: 0,
@@ -156,7 +167,18 @@ impl Browser {
     }
 
     pub(crate) fn navigate(&mut self, path: impl Into<PathBuf>) -> bool {
-        let path = normalize_path(path.into());
+        let mut path = normalize_path(path.into());
+        if let Some(root) = &self.preview_root {
+            let Ok(canonical) = fs::canonicalize(&path) else {
+                self.error = Some(format!("Cannot open {}", path.display()));
+                return false;
+            };
+            if !canonical.starts_with(root) {
+                self.error = Some("Preview is limited to its sample folder".to_owned());
+                return false;
+            }
+            path = canonical;
+        }
         let Ok(entries) = read_entries(&path) else {
             self.error = Some(format!("Cannot open {}", path.display()));
             return false;
@@ -562,6 +584,20 @@ mod tests {
             normalize_path(PathBuf::from("/../../tmp")),
             Path::new("/tmp")
         );
+    }
+
+    #[test]
+    fn preview_cannot_navigate_outside_its_sample_folder() -> std::io::Result<()> {
+        let directory = TestDirectory::new()?;
+        let sample = directory.path().join("sample");
+        fs::create_dir(&sample)?;
+        let mut browser = Browser::new(&sample);
+        browser.preview_root = Some(fs::canonicalize(&sample)?);
+
+        assert!(!browser.navigate(directory.path()));
+        assert_eq!(browser.current_dir(), sample);
+        assert!(!browser.go_up());
+        Ok(())
     }
 
     #[test]

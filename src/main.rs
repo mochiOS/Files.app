@@ -15,6 +15,7 @@ impl App for FilesApp {
 
     fn window(&self) -> WindowOptions {
         WindowOptions::new("Files")
+            .size(920.0, 640.0)
             .resizable(true)
     }
 

@@ -19,6 +19,8 @@ const FILE_SVG: &[u8] = include_bytes!("../resources/icons/file.svg");
 const APPLICATION_SVG: &[u8] = include_bytes!("../resources/icons/application.svg");
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+const GRID_HEADER_HEIGHT: f32 = 60.0;
+const GRID_SIDE_INSET: f32 = 24.0;
 const CONTEXT_COMMAND_OPEN: u32 = 1;
 const CONTEXT_COMMAND_RELOAD: u32 = 2;
 const CONTEXT_COMMAND_NEW_FOLDER: u32 = 3;
@@ -263,7 +265,6 @@ impl View for FilesView {
         paint_toolbar(&layout, &state, context);
         paint_sidebar(&layout, &state, context);
         paint_content(&layout, &state, context);
-        paint_status(&layout, &state, context);
     }
 
     fn handle_event(
@@ -722,7 +723,7 @@ impl Layout {
         } else {
             212.0
         };
-        let content_height = (bounds.size.height - Theme::current().layout.top_bar_height - Theme::current().layout.status_bar_height).max(0.0);
+        let content_height = (bounds.size.height - Theme::current().layout.top_bar_height).max(0.0);
         Self {
             bounds,
             toolbar: Rect::new(
@@ -745,9 +746,9 @@ impl Layout {
             ),
             status: Rect::new(
                 bounds.origin.x,
-                bounds.origin.y + bounds.size.height - Theme::current().layout.status_bar_height,
+                bounds.origin.y + bounds.size.height,
                 bounds.size.width,
-                Theme::current().layout.status_bar_height,
+                0.0,
             ),
             sidebar_width,
         }
@@ -1201,16 +1202,49 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
 }
 
 fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
+    let directory = state.browser.current_dir();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let preview_home = std::env::var_os("MOCHIOS_PREVIEW_ROOT").map(PathBuf::from);
+    let title = if home.as_deref() == Some(directory)
+        || preview_home.as_deref() == Some(directory)
+        || directory.parent() == Some(Path::new("/home")) {
+        String::from("Home")
+    } else if directory == Path::new("/") {
+        String::from("Computer")
+    } else {
+        directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("Files"))
+    };
+    paint_text(
+        title,
+        Rect::new(layout.content.origin.x + GRID_SIDE_INSET, layout.content.origin.y + 16.0,
+            layout.content.size.width - GRID_SIDE_INSET * 2.0, 32.0),
+        TextRole::TitleMedium,
+        Some(600),
+        colors().text_primary,
+        TextAlignment::Start,
+        context,
+    );
+    stroke_bottom(Rect::new(layout.content.origin.x + GRID_SIDE_INSET,
+        layout.content.origin.y + GRID_HEADER_HEIGHT - 1.0,
+        (layout.content.size.width - GRID_SIDE_INSET * 2.0).max(0.0), 1.0), context);
+
     let columns = grid_column_count(layout.content);
-    let content_width = columns as f32 * Theme::current().layout.browser_grid_cell_width;
-    let left =
-        layout.content.origin.x + ((layout.content.size.width - content_width) / 2.0).max(12.0);
+    let left = layout.content.origin.x + GRID_SIDE_INSET;
+    context.display_list.push(DrawCommand::PushClip {
+        rect: Rect::new(layout.content.origin.x,
+            layout.content.origin.y + GRID_HEADER_HEIGHT,
+            layout.content.size.width,
+            (layout.content.size.height - GRID_HEADER_HEIGHT).max(0.0)),
+    });
     for (index, entry) in state.browser.entries().iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
         let cell = Rect::new(
             left + column as f32 * Theme::current().layout.browser_grid_cell_width,
-            layout.content.origin.y + 16.0 + row as f32 * Theme::current().layout.browser_grid_cell_height - state.scroll,
+            layout.content.origin.y + GRID_HEADER_HEIGHT + 12.0 + row as f32 * Theme::current().layout.browser_grid_cell_height - state.scroll,
             Theme::current().layout.browser_grid_cell_width,
             Theme::current().layout.browser_grid_cell_height,
         );
@@ -1272,6 +1306,7 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
             context,
         );
     }
+    context.display_list.push(DrawCommand::PopClip);
 }
 
 fn paint_editable_name(
@@ -1323,57 +1358,6 @@ fn paint_editable_name(
             context,
         );
     }
-}
-
-fn paint_status(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
-    Rectangle::new()
-        .color(RectangleColor::Custom(colors().toolbar_background))
-        .paint(layout.status, context);
-    context.display_list.push(DrawCommand::StrokeRect {
-        rect: Rect::new(
-            layout.status.origin.x,
-            layout.status.origin.y + 0.5,
-            layout.status.size.width,
-            1.0,
-        ),
-        color: colors().border,
-        width: 1.0,
-    });
-    let count = state.browser.entries().len();
-    let selection = usize::from(state.browser.selected().is_some());
-    let summary = if selection == 0 {
-        format!("{count} items")
-    } else {
-        format!("{count} items, {selection} selected")
-    };
-    paint_text(
-        summary,
-        Rect::new(
-            layout.status.origin.x + layout.sidebar_width + 12.0,
-            layout.status.origin.y + 5.0,
-            180.0,
-            18.0,
-        ),
-        TextRole::Caption,
-        None,
-        colors().text_secondary,
-        TextAlignment::Start,
-        context,
-    );
-    paint_text(
-        layout_path(state.browser.current_dir()),
-        Rect::new(
-            layout.status.origin.x + layout.sidebar_width + 200.0,
-            layout.status.origin.y + 5.0,
-            layout.status.size.width - layout.sidebar_width - 214.0,
-            18.0,
-        ),
-        TextRole::Caption,
-        None,
-        colors().text_secondary,
-        TextAlignment::End,
-        context,
-    );
 }
 
 fn paint_icon_button(
@@ -1564,12 +1548,14 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
             }
             ViewMode::Grid => {
                 let columns = grid_column_count(layout.content);
-                let content_width = columns as f32 * Theme::current().layout.browser_grid_cell_width;
-                let left = layout.content.origin.x
-                    + ((layout.content.size.width - content_width) / 2.0).max(12.0);
+                let left = layout.content.origin.x + GRID_SIDE_INSET;
                 let x = point.x - left;
-                let y = point.y - layout.content.origin.y - 16.0 + state.scroll;
-                if x >= 0.0 && y >= 0.0 {
+                let y = point.y - layout.content.origin.y - GRID_HEADER_HEIGHT - 12.0 + state.scroll;
+                if point.y >= layout.content.origin.y + GRID_HEADER_HEIGHT
+                    && x >= 0.0
+                    && y >= 0.0
+                    && (x / Theme::current().layout.browser_grid_cell_width) < columns as f32
+                {
                     Some((y / Theme::current().layout.browser_grid_cell_height) as usize * columns + (x / Theme::current().layout.browser_grid_cell_width) as usize)
                 } else {
                     None
@@ -1592,19 +1578,19 @@ fn maximum_scroll(layout: &Layout, state: &FilesState) -> f32 {
         ViewMode::List => Theme::current().layout.compact_control_height + count as f32 * Theme::current().layout.control_height,
         ViewMode::Grid => {
             let columns = grid_column_count(layout.content);
-            24.0 + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
+            GRID_HEADER_HEIGHT + 20.0 + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
         }
     };
     (content_height - layout.content.size.height).max(0.0)
 }
 
 fn grid_column_count(content: Rect) -> usize {
-    (content.size.width / Theme::current().layout.browser_grid_cell_width).floor().max(1.0) as usize
+    ((content.size.width - GRID_SIDE_INSET * 2.0)
+        / Theme::current().layout.browser_grid_cell_width)
+        .floor()
+        .max(1.0) as usize
 }
 
-fn layout_path(path: &Path) -> String {
-    path.display().to_string()
-}
 
 #[cfg(test)]
 mod tests {
