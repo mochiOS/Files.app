@@ -1,5 +1,6 @@
 mod browser;
 mod files_view;
+mod sidebar;
 
 use files_view::FilesView;
 use viewkit::prelude::*;

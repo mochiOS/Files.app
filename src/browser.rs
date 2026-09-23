@@ -158,6 +158,14 @@ impl Browser {
         self.error.as_deref()
     }
 
+    pub(crate) fn report_error(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
+    pub(crate) fn clear_error(&mut self) {
+        self.error = None;
+    }
+
     pub(crate) fn can_go_back(&self) -> bool {
         self.history_index > 0
     }

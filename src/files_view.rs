@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
+use crate::sidebar::SidebarBookmarks;
 use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
 use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
 use viewkit::draw_command::DrawCommand;
@@ -28,34 +29,43 @@ const CONTEXT_COMMAND_RENAME: u32 = 4;
 const CONTEXT_COMMAND_DELETE: u32 = 5;
 const CONTEXT_COMMAND_CONFIRM_DELETE: u32 = 6;
 const CONTEXT_COMMAND_CANCEL_DELETE: u32 = 7;
+const CONTEXT_COMMAND_ADD_TO_SIDEBAR: u32 = 8;
+const CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR: u32 = 9;
+
+const DEFAULT_SIDEBAR_DIRECTORIES: [&str; 6] = [
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Movies",
+    "Music",
+    "Pictures",
+];
 
 fn colors() -> viewkit::theme::BrowserTokens {
     Theme::current().browser
 }
 
-const SIDEBAR_ITEMS: [SidebarItem; 4] = [
-    SidebarItem::new("Applications", "/applications", SidebarIcon::Application),
-    SidebarItem::new("System", "/system", SidebarIcon::Folder),
-    SidebarItem::new("Libraries", "/libraries", SidebarIcon::Folder),
-    SidebarItem::new("Temporary", "/tmp", SidebarIcon::Folder),
-];
-
 #[derive(Clone, Copy)]
 enum SidebarIcon {
     Application,
     Folder,
+    File,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SidebarItem {
-    label: &'static str,
-    path: &'static str,
+    label: String,
+    path: PathBuf,
     icon: SidebarIcon,
 }
 
 impl SidebarItem {
-    const fn new(label: &'static str, path: &'static str, icon: SidebarIcon) -> Self {
-        Self { label, path, icon }
+    fn new(label: impl Into<String>, path: PathBuf, icon: SidebarIcon) -> Self {
+        Self {
+            label: label.into(),
+            path,
+            icon,
+        }
     }
 }
 
@@ -91,12 +101,51 @@ impl FileIcons {
         match icon {
             SidebarIcon::Application => self.application.as_ref(),
             SidebarIcon::Folder => self.folder.as_ref(),
+            SidebarIcon::File => self.file.as_ref(),
         }
     }
 }
 
 fn uses_application_icon(entry: &FileEntry) -> bool {
     entry.kind == EntryKind::Application || entry.path == Path::new("/applications")
+}
+
+fn is_default_sidebar_path(home: &Path, path: &Path) -> bool {
+    DEFAULT_SIDEBAR_DIRECTORIES
+        .iter()
+        .any(|name| home.join(name) == path)
+}
+
+fn sidebar_items(home: &Path, bookmarks: &SidebarBookmarks) -> Vec<SidebarItem> {
+    let mut items = DEFAULT_SIDEBAR_DIRECTORIES
+        .iter()
+        .filter(|name| !bookmarks.hides_default(&home.join(name)))
+        .map(|name| SidebarItem::new(*name, home.join(name), SidebarIcon::Folder))
+        .collect::<Vec<_>>();
+    for path in bookmarks.paths() {
+        if items.iter().any(|item| item.path == *path) {
+            continue;
+        }
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| path.display().to_string());
+        let icon = if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().ends_with(".app"))
+            {
+                SidebarIcon::Application
+            } else {
+                SidebarIcon::Folder
+            }
+        } else {
+            SidebarIcon::File
+        };
+        items.push(SidebarItem::new(label, path.clone(), icon));
+    }
+    items
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +180,9 @@ fn request_hover_redraw(
 
 struct FilesState {
     browser: Browser,
+    home_directory: PathBuf,
+    sidebar_items: Vec<SidebarItem>,
+    sidebar_bookmarks: SidebarBookmarks,
     icons: FileIcons,
     scroll: f32,
     hover: Option<HitTarget>,
@@ -142,6 +194,7 @@ struct FilesState {
     next_context_request: u64,
     active_context_request: Option<u64>,
     context_anchor: Point,
+    context_sidebar_path: Option<PathBuf>,
     name_edit: Option<NameEdit>,
     pending_delete: Option<PathBuf>,
 }
@@ -162,9 +215,16 @@ impl FilesView {
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| PathBuf::from("/"));
+        let browser = Browser::new(initial_directory);
+        let home = browser.current_dir().to_path_buf();
+        let sidebar_bookmarks = SidebarBookmarks::load();
+        let sidebar_items = sidebar_items(&home, &sidebar_bookmarks);
         Self {
             state: RefCell::new(FilesState {
-                browser: Browser::new(initial_directory),
+                browser,
+                home_directory: home,
+                sidebar_items,
+                sidebar_bookmarks,
                 icons: FileIcons::new(),
                 scroll: 0.0,
                 hover: None,
@@ -176,6 +236,7 @@ impl FilesView {
                 next_context_request: 0,
                 active_context_request: None,
                 context_anchor: Point::new(0.0, 0.0),
+                context_sidebar_path: None,
                 name_edit: None,
                 pending_delete: None,
             }),
@@ -205,6 +266,75 @@ impl FilesView {
         if is_double_click && entry.is_directory() {
             return Self::navigate(state, entry.path);
         }
+        true
+    }
+
+    fn activate_sidebar_item(state: &mut FilesState, index: usize) -> bool {
+        let Some(path) = state.sidebar_items.get(index).map(|item| item.path.clone()) else {
+            return false;
+        };
+        if path.is_dir() {
+            return Self::navigate(state, path);
+        }
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            return false;
+        };
+        if !Self::navigate(state, parent) {
+            return false;
+        }
+        state.browser.select(path);
+        true
+    }
+
+    fn add_selected_to_sidebar(state: &mut FilesState) -> bool {
+        let Some(path) = state.browser.selected().map(Path::to_path_buf) else {
+            return false;
+        };
+        if state.sidebar_items.iter().any(|item| item.path == path) {
+            return false;
+        }
+        let mut updated = state.sidebar_bookmarks.clone();
+        let restored_default = is_default_sidebar_path(&state.home_directory, &path)
+            && updated.restore_default(&path);
+        if !restored_default && !updated.add(path) {
+            return false;
+        }
+        if let Err(error) = updated.save() {
+            eprintln!("Files: failed to save sidebar bookmarks: {error}");
+            state
+                .browser
+                .report_error(format!("Cannot save sidebar: {error}"));
+            return false;
+        }
+        state.sidebar_bookmarks = updated;
+        state.sidebar_items = sidebar_items(&state.home_directory, &state.sidebar_bookmarks);
+        state.browser.clear_error();
+        true
+    }
+
+    fn remove_context_item_from_sidebar(state: &mut FilesState) -> bool {
+        let Some(path) = state.context_sidebar_path.take() else {
+            return false;
+        };
+        let mut updated = state.sidebar_bookmarks.clone();
+        let removed = if is_default_sidebar_path(&state.home_directory, &path) {
+            updated.hide_default(path.clone())
+        } else {
+            updated.remove(&path)
+        };
+        if !removed {
+            return false;
+        }
+        if let Err(error) = updated.save() {
+            eprintln!("Files: failed to save sidebar bookmarks: {error}");
+            state
+                .browser
+                .report_error(format!("Cannot save sidebar: {error}"));
+            return false;
+        }
+        state.sidebar_bookmarks = updated;
+        state.sidebar_items = sidebar_items(&state.home_directory, &state.sidebar_bookmarks);
+        state.browser.clear_error();
         true
     }
 
@@ -353,9 +483,9 @@ impl View for FilesView {
                         state.scroll = 0.0;
                         true
                     }
-                    Some(HitTarget::Sidebar(index)) => SIDEBAR_ITEMS
-                        .get(index)
-                        .is_some_and(|item| Self::navigate(&mut state, item.path)),
+                    Some(HitTarget::Sidebar(index)) => {
+                        Self::activate_sidebar_item(&mut state, index)
+                    }
                     Some(HitTarget::Entry(index)) => Self::activate_entry(&mut state, index),
                     Some(HitTarget::Content) => {
                         state.browser.clear_selection();
@@ -379,8 +509,16 @@ impl View for FilesView {
                     return EventResult::Consumed;
                 }
                 let target = hit_test(&layout, *position, &state);
-                let selected_entry = if let Some(HitTarget::Entry(index)) = target {
-                    let entry = state.browser.entries().get(index).cloned().cloned();
+                let sidebar_path = match target.as_ref() {
+                    Some(HitTarget::Sidebar(index)) => state
+                        .sidebar_items
+                        .get(*index)
+                        .map(|item| item.path.clone()),
+                    _ => None,
+                };
+                state.context_sidebar_path = sidebar_path.clone();
+                let selected_entry = if let Some(HitTarget::Entry(index)) = target.as_ref() {
+                    let entry = state.browser.entries().get(*index).cloned().cloned();
                     if let Some(entry) = entry {
                         state.browser.select(entry.path.clone());
                         Some(entry)
@@ -391,12 +529,33 @@ impl View for FilesView {
                     state.browser.clear_selection();
                     None
                 };
-                let items = if let Some(entry) = selected_entry {
+                let items = if let Some(path) = sidebar_path {
+                    vec![ContextMenuItem {
+                        command_id: CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR,
+                        label: String::from("Remove from Sidebar"),
+                        enabled: true,
+                        checked: false,
+                        destructive: false,
+                        separator: false,
+                    }]
+                } else if let Some(entry) = selected_entry {
+                    let sidebar_contains = state
+                        .sidebar_items
+                        .iter()
+                        .any(|item| item.path == entry.path);
                     vec![
                         ContextMenuItem {
                             command_id: CONTEXT_COMMAND_OPEN,
                             label: String::from("Open"),
                             enabled: entry.is_directory(),
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        },
+                        ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_ADD_TO_SIDEBAR,
+                            label: String::from("Add to Sidebar"),
+                            enabled: !sidebar_contains,
                             checked: false,
                             destructive: false,
                             separator: false,
@@ -491,6 +650,10 @@ impl View for FilesView {
                     return EventResult::Ignored;
                 }
                 state.active_context_request = None;
+                let sidebar_command = matches!(
+                    *command_id,
+                    Some(CONTEXT_COMMAND_ADD_TO_SIDEBAR | CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR)
+                );
                 let changed = match command_id {
                     Some(CONTEXT_COMMAND_OPEN) => state.browser.open_selected(),
                     Some(CONTEXT_COMMAND_NEW_FOLDER) => {
@@ -561,10 +724,18 @@ impl View for FilesView {
                         state.browser.reload();
                         true
                     }
+                    Some(CONTEXT_COMMAND_ADD_TO_SIDEBAR) => {
+                        Self::add_selected_to_sidebar(&mut state)
+                    }
+                    Some(CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR) => {
+                        Self::remove_context_item_from_sidebar(&mut state)
+                    }
                     _ => false,
                 };
                 if changed {
                     state.scroll = 0.0;
+                }
+                if changed || sidebar_command {
                     context.request_redraw_in(bounds);
                 }
                 EventResult::Consumed
@@ -964,7 +1135,7 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         TextAlignment::Start,
         context,
     );
-    for (index, item) in SIDEBAR_ITEMS.iter().enumerate() {
+    for (index, item) in state.sidebar_items.iter().enumerate() {
         paint_sidebar_item(
             layout,
             state,
@@ -990,11 +1161,16 @@ fn paint_sidebar_item(
         layout.sidebar_width - 16.0,
         29.0,
     );
-    let selected = state.browser.current_dir() == Path::new(item.path);
+    let selected = if item.path.is_dir() {
+        state.browser.current_dir() == item.path
+    } else {
+        state.browser.current_dir() == item.path.parent().unwrap_or(Path::new("/"))
+            && state.browser.selected() == Some(item.path.as_path())
+    };
     let hovered = state.hover == Some(HitTarget::Sidebar(index));
     let mut node = AccessibilityNode::new(AccessibilityRole::ListItem, bounds);
-    node.label = Some(item.label.to_owned());
-    node.value = Some(item.path.to_owned());
+    node.label = Some(item.label.clone());
+    node.value = Some(item.path.display().to_string());
     node.selected = selected;
     context.record_accessibility(node);
     if selected || hovered {
@@ -1014,7 +1190,7 @@ fn paint_sidebar_item(
         );
     }
     paint_text(
-        item.label,
+        item.label.clone(),
         Rect::new(
             bounds.origin.x + 34.0,
             bounds.origin.y + 4.0,
@@ -1525,11 +1701,10 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
         return Some(HitTarget::Search);
     }
     if layout.sidebar.contains(point) {
-        let offsets = [42.0, 76.0, 110.0, 144.0];
-        for (index, offset) in offsets.iter().enumerate() {
+        for index in 0..state.sidebar_items.len() {
             let row = Rect::new(
                 layout.sidebar.origin.x + 8.0,
-                layout.sidebar.origin.y + *offset,
+                layout.sidebar.origin.y + 42.0 + index as f32 * 34.0,
                 layout.sidebar_width - 16.0,
                 29.0,
             );
@@ -1595,6 +1770,21 @@ fn grid_column_count(content: Rect) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_sidebar_uses_standard_home_directories_in_order() {
+        let home = Path::new("/home/tester");
+        let items = sidebar_items(home, &SidebarBookmarks::default());
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            DEFAULT_SIDEBAR_DIRECTORIES
+        );
+        assert_eq!(items[0].path, home.join("Desktop"));
+        assert_eq!(items[5].path, home.join("Pictures"));
+    }
 
     #[test]
     fn supplied_file_icons_decode() {
