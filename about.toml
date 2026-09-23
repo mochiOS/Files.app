@@ -4,10 +4,10 @@ version = "0.1.0"
 developer = "mochiOS"
 entry = "entry.elf"
 description = "File manager"
-icon = "appicon.svg"
+icon = "appicon.png"
 
 resources = [
-    "appicon.svg",
+    "appicon.png",
     "icons/folder.svg",
     "icons/file.svg",
     "icons/application.svg",

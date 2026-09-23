@@ -152,7 +152,6 @@ fn sidebar_items(home: &Path, bookmarks: &SidebarBookmarks) -> Vec<SidebarItem> 
 enum HitTarget {
     Back,
     Forward,
-    Up,
     ListMode,
     GridMode,
     Path,
@@ -465,11 +464,6 @@ impl View for FilesView {
                     }
                     Some(HitTarget::Forward) => {
                         let changed = state.browser.go_forward();
-                        state.scroll = 0.0;
-                        changed
-                    }
-                    Some(HitTarget::Up) => {
-                        let changed = state.browser.go_up();
                         state.scroll = 0.0;
                         changed
                     }
@@ -949,9 +943,9 @@ impl Layout {
     fn path(&self) -> Rect {
         let control = Theme::current().layout.compact_control_height;
         Rect::new(
-            self.bounds.origin.x + 125.0,
+            self.bounds.origin.x + 90.0,
             self.bounds.origin.y + (Theme::current().layout.top_bar_height - control) / 2.0,
-            (self.bounds.size.width - 429.0).max(80.0),
+            (self.bounds.size.width - 394.0).max(80.0),
             control,
         )
     }
@@ -988,13 +982,6 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         state.hover == Some(HitTarget::Forward),
         context,
     );
-    paint_icon_button(
-        layout.toolbar_button(2),
-        IconName::FolderOpen,
-        state.browser.current_dir() != Path::new("/"),
-        state.hover == Some(HitTarget::Up),
-        context,
-    );
     let path = layout.path();
     Rectangle::new()
         .color(RectangleColor::Custom(if state.path_focused {
@@ -1025,7 +1012,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         },
         Rect::new(
             path.origin.x + 9.0,
-            path.origin.y + 5.0,
+            path.origin.y + 4.0,
             path.size.width - 18.0,
             20.0,
         ),
@@ -1090,7 +1077,7 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         search_text,
         Rect::new(
             search.origin.x + 28.0,
-            search.origin.y + 6.0,
+            search.origin.y + 4.0,
             search.size.width - 36.0,
             20.0,
         ),
@@ -1676,12 +1663,11 @@ fn list_columns(bounds: Rect) -> [Rect; 4] {
 }
 
 fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarget> {
-    for index in 0..3 {
+    for index in 0..2 {
         if layout.toolbar_button(index).contains(point) {
             return Some(match index {
                 0 => HitTarget::Back,
-                1 => HitTarget::Forward,
-                _ => HitTarget::Up,
+                _ => HitTarget::Forward,
             });
         }
     }
