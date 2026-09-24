@@ -1,4 +1,5 @@
 mod browser;
+mod file_association;
 mod files_view;
 mod sidebar;
 

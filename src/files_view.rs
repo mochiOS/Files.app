@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
+use crate::file_association::{self, Handler as AssociationHandler};
 use crate::sidebar::SidebarBookmarks;
 use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
 use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
@@ -31,6 +32,10 @@ const CONTEXT_COMMAND_CONFIRM_DELETE: u32 = 6;
 const CONTEXT_COMMAND_CANCEL_DELETE: u32 = 7;
 const CONTEXT_COMMAND_ADD_TO_SIDEBAR: u32 = 8;
 const CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR: u32 = 9;
+const CONTEXT_COMMAND_OPEN_WITH: u32 = 10;
+const CONTEXT_COMMAND_SET_DEFAULT: u32 = 11;
+const CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER: u32 = 1_000;
+const CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER: u32 = 2_000;
 
 const DEFAULT_SIDEBAR_DIRECTORIES: [&str; 6] = [
     "Desktop",
@@ -132,10 +137,11 @@ fn sidebar_items(home: &Path, bookmarks: &SidebarBookmarks) -> Vec<SidebarItem> 
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| path.display().to_string());
         let icon = if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().ends_with(".app"))
-            {
+            if path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with(".app")
+            }) {
                 SidebarIcon::Application
             } else {
                 SidebarIcon::Folder
@@ -196,6 +202,8 @@ struct FilesState {
     context_sidebar_path: Option<PathBuf>,
     name_edit: Option<NameEdit>,
     pending_delete: Option<PathBuf>,
+    open_with_path: Option<PathBuf>,
+    open_with_handlers: Vec<AssociationHandler>,
 }
 
 struct NameEdit {
@@ -238,6 +246,8 @@ impl FilesView {
                 context_sidebar_path: None,
                 name_edit: None,
                 pending_delete: None,
+                open_with_path: None,
+                open_with_handlers: Vec::new(),
             }),
         }
     }
@@ -262,10 +272,42 @@ impl FilesView {
             path == &entry.path && now.saturating_duration_since(*clicked_at) <= DOUBLE_CLICK
         });
         state.last_click = Some((entry.path.clone(), now));
-        if is_double_click && entry.is_directory() {
-            return Self::navigate(state, entry.path);
+        if is_double_click {
+            return Self::open_path(state, &entry);
         }
         true
+    }
+
+    fn open_path(state: &mut FilesState, entry: &FileEntry) -> bool {
+        if entry.is_directory() {
+            return Self::navigate(state, entry.path.clone());
+        }
+        match file_association::open(&entry.path, None) {
+            Ok(()) => {
+                state.browser.clear_error();
+                true
+            }
+            Err(error) => {
+                state.browser.report_error(error);
+                true
+            }
+        }
+    }
+
+    fn open_selected(state: &mut FilesState) -> bool {
+        let Some(path) = state.browser.selected().map(Path::to_path_buf) else {
+            return false;
+        };
+        let Some(entry) = state
+            .browser
+            .entries()
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+        else {
+            return false;
+        };
+        Self::open_path(state, &entry)
     }
 
     fn activate_sidebar_item(state: &mut FilesState, index: usize) -> bool {
@@ -293,8 +335,8 @@ impl FilesView {
             return false;
         }
         let mut updated = state.sidebar_bookmarks.clone();
-        let restored_default = is_default_sidebar_path(&state.home_directory, &path)
-            && updated.restore_default(&path);
+        let restored_default =
+            is_default_sidebar_path(&state.home_directory, &path) && updated.restore_default(&path);
         if !restored_default && !updated.add(path) {
             return false;
         }
@@ -523,6 +565,8 @@ impl View for FilesView {
                     state.browser.clear_selection();
                     None
                 };
+                state.open_with_path = None;
+                state.open_with_handlers.clear();
                 let items = if let Some(path) = sidebar_path {
                     vec![ContextMenuItem {
                         command_id: CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR,
@@ -537,15 +581,45 @@ impl View for FilesView {
                         .sidebar_items
                         .iter()
                         .any(|item| item.path == entry.path);
-                    vec![
-                        ContextMenuItem {
-                            command_id: CONTEXT_COMMAND_OPEN,
-                            label: String::from("Open"),
-                            enabled: entry.is_directory(),
+                    state.open_with_path = (!entry.is_directory()).then(|| entry.path.clone());
+                    state.open_with_handlers = if entry.is_directory() {
+                        Vec::new()
+                    } else {
+                        match file_association::handlers(&entry.path) {
+                            Ok(handlers) => handlers,
+                            Err(error) => {
+                                state.browser.report_error(error);
+                                Vec::new()
+                            }
+                        }
+                    };
+                    let mut items = vec![ContextMenuItem {
+                        command_id: CONTEXT_COMMAND_OPEN,
+                        label: String::from("Open"),
+                        enabled: true,
+                        checked: false,
+                        destructive: false,
+                        separator: false,
+                    }];
+                    if !entry.is_directory() {
+                        items.push(ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_OPEN_WITH,
+                            label: String::from("Open With…"),
+                            enabled: !state.open_with_handlers.is_empty(),
                             checked: false,
                             destructive: false,
                             separator: false,
-                        },
+                        });
+                        items.push(ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_SET_DEFAULT,
+                            label: String::from("Set Default Application…"),
+                            enabled: !state.open_with_handlers.is_empty(),
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        });
+                    }
+                    items.extend([
                         ContextMenuItem {
                             command_id: CONTEXT_COMMAND_ADD_TO_SIDEBAR,
                             label: String::from("Add to Sidebar"),
@@ -602,7 +676,8 @@ impl View for FilesView {
                             destructive: false,
                             separator: false,
                         },
-                    ]
+                    ]);
+                    items
                 } else {
                     vec![
                         ContextMenuItem {
@@ -649,7 +724,51 @@ impl View for FilesView {
                     Some(CONTEXT_COMMAND_ADD_TO_SIDEBAR | CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR)
                 );
                 let changed = match command_id {
-                    Some(CONTEXT_COMMAND_OPEN) => state.browser.open_selected(),
+                    Some(CONTEXT_COMMAND_OPEN) => Self::open_selected(&mut state),
+                    Some(CONTEXT_COMMAND_OPEN_WITH) => {
+                        let items = state
+                            .open_with_handlers
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, handler)| {
+                                let command_id = CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER
+                                    .checked_add(u32::try_from(index).ok()?)?;
+                                Some(ContextMenuItem {
+                                    command_id,
+                                    label: handler.name.clone(),
+                                    enabled: true,
+                                    checked: false,
+                                    destructive: false,
+                                    separator: false,
+                                })
+                            })
+                            .collect();
+                        let anchor = state.context_anchor;
+                        Self::show_context_menu(&mut state, anchor, items, context);
+                        false
+                    }
+                    Some(CONTEXT_COMMAND_SET_DEFAULT) => {
+                        let items = state
+                            .open_with_handlers
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, handler)| {
+                                let command_id = CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER
+                                    .checked_add(u32::try_from(index).ok()?)?;
+                                Some(ContextMenuItem {
+                                    command_id,
+                                    label: format!("Use {} by Default", handler.name),
+                                    enabled: true,
+                                    checked: false,
+                                    destructive: false,
+                                    separator: false,
+                                })
+                            })
+                            .collect();
+                        let anchor = state.context_anchor;
+                        Self::show_context_menu(&mut state, anchor, items, context);
+                        false
+                    }
                     Some(CONTEXT_COMMAND_NEW_FOLDER) => {
                         let created = state.browser.create_folder();
                         if let Some(path) = created {
@@ -723,6 +842,46 @@ impl View for FilesView {
                     }
                     Some(CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR) => {
                         Self::remove_context_item_from_sidebar(&mut state)
+                    }
+                    Some(command_id)
+                        if *command_id >= CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER =>
+                    {
+                        let index =
+                            (*command_id - CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER) as usize;
+                        let path = state.open_with_path.clone();
+                        let bundle_id = state
+                            .open_with_handlers
+                            .get(index)
+                            .map(|handler| handler.bundle_id.clone());
+                        match (path, bundle_id) {
+                            (Some(path), Some(bundle_id)) => {
+                                match file_association::set_default(&path, &bundle_id) {
+                                    Ok(()) => state.browser.clear_error(),
+                                    Err(error) => state.browser.report_error(error),
+                                }
+                                true
+                            }
+                            _ => false,
+                        }
+                    }
+                    Some(command_id) if *command_id >= CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER => {
+                        let index =
+                            (*command_id - CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER) as usize;
+                        let path = state.open_with_path.clone();
+                        let bundle_id = state
+                            .open_with_handlers
+                            .get(index)
+                            .map(|handler| handler.bundle_id.clone());
+                        match (path, bundle_id) {
+                            (Some(path), Some(bundle_id)) => {
+                                match file_association::open(&path, Some(&bundle_id)) {
+                                    Ok(()) => state.browser.clear_error(),
+                                    Err(error) => state.browser.report_error(error),
+                                }
+                                true
+                            }
+                            _ => false,
+                        }
                     }
                     _ => false,
                 };
@@ -842,7 +1001,7 @@ impl View for FilesView {
                         true
                     }
                     Key::Enter => {
-                        let opened = state.browser.open_selected();
+                        let opened = Self::open_selected(&mut state);
                         if opened {
                             state.scroll = 0.0;
                         }
@@ -1273,7 +1432,9 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
 
     let entries = state.browser.entries();
     for (index, entry) in entries.iter().enumerate() {
-        let y = layout.content.origin.y + Theme::current().layout.compact_control_height + index as f32 * Theme::current().layout.control_height
+        let y = layout.content.origin.y
+            + Theme::current().layout.compact_control_height
+            + index as f32 * Theme::current().layout.control_height
             - state.scroll;
         let row = Rect::new(
             layout.content.origin.x,
@@ -1370,7 +1531,8 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     let preview_home = std::env::var_os("MOCHIOS_PREVIEW_ROOT").map(PathBuf::from);
     let title = if home.as_deref() == Some(directory)
         || preview_home.as_deref() == Some(directory)
-        || directory.parent() == Some(Path::new("/home")) {
+        || directory.parent() == Some(Path::new("/home"))
+    {
         String::from("Home")
     } else if directory == Path::new("/") {
         String::from("Computer")
@@ -1382,32 +1544,48 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
     };
     paint_text(
         title,
-        Rect::new(layout.content.origin.x + GRID_SIDE_INSET, layout.content.origin.y + 16.0,
-            layout.content.size.width - GRID_SIDE_INSET * 2.0, 32.0),
+        Rect::new(
+            layout.content.origin.x + GRID_SIDE_INSET,
+            layout.content.origin.y + 16.0,
+            layout.content.size.width - GRID_SIDE_INSET * 2.0,
+            32.0,
+        ),
         TextRole::TitleMedium,
         Some(600),
         colors().text_primary,
         TextAlignment::Start,
         context,
     );
-    stroke_bottom(Rect::new(layout.content.origin.x + GRID_SIDE_INSET,
-        layout.content.origin.y + GRID_HEADER_HEIGHT - 1.0,
-        (layout.content.size.width - GRID_SIDE_INSET * 2.0).max(0.0), 1.0), context);
+    stroke_bottom(
+        Rect::new(
+            layout.content.origin.x + GRID_SIDE_INSET,
+            layout.content.origin.y + GRID_HEADER_HEIGHT - 1.0,
+            (layout.content.size.width - GRID_SIDE_INSET * 2.0).max(0.0),
+            1.0,
+        ),
+        context,
+    );
 
     let columns = grid_column_count(layout.content);
     let left = layout.content.origin.x + GRID_SIDE_INSET;
     context.display_list.push(DrawCommand::PushClip {
-        rect: Rect::new(layout.content.origin.x,
+        rect: Rect::new(
+            layout.content.origin.x,
             layout.content.origin.y + GRID_HEADER_HEIGHT,
             layout.content.size.width,
-            (layout.content.size.height - GRID_HEADER_HEIGHT).max(0.0)),
+            (layout.content.size.height - GRID_HEADER_HEIGHT).max(0.0),
+        ),
     });
     for (index, entry) in state.browser.entries().iter().enumerate() {
         let column = index % columns;
         let row = index / columns;
         let cell = Rect::new(
             left + column as f32 * Theme::current().layout.browser_grid_cell_width,
-            layout.content.origin.y + GRID_HEADER_HEIGHT + 12.0 + row as f32 * Theme::current().layout.browser_grid_cell_height - state.scroll,
+            layout.content.origin.y
+                + GRID_HEADER_HEIGHT
+                + 12.0
+                + row as f32 * Theme::current().layout.browser_grid_cell_height
+                - state.scroll,
             Theme::current().layout.browser_grid_cell_width,
             Theme::current().layout.browser_grid_cell_height,
         );
@@ -1703,21 +1881,28 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
         let count = state.browser.entries().len();
         let index = match state.browser.view_mode() {
             ViewMode::List => {
-                let relative =
-                    point.y - layout.content.origin.y - Theme::current().layout.compact_control_height + state.scroll;
-                (relative >= 0.0).then_some((relative / Theme::current().layout.control_height) as usize)
+                let relative = point.y
+                    - layout.content.origin.y
+                    - Theme::current().layout.compact_control_height
+                    + state.scroll;
+                (relative >= 0.0)
+                    .then_some((relative / Theme::current().layout.control_height) as usize)
             }
             ViewMode::Grid => {
                 let columns = grid_column_count(layout.content);
                 let left = layout.content.origin.x + GRID_SIDE_INSET;
                 let x = point.x - left;
-                let y = point.y - layout.content.origin.y - GRID_HEADER_HEIGHT - 12.0 + state.scroll;
+                let y =
+                    point.y - layout.content.origin.y - GRID_HEADER_HEIGHT - 12.0 + state.scroll;
                 if point.y >= layout.content.origin.y + GRID_HEADER_HEIGHT
                     && x >= 0.0
                     && y >= 0.0
                     && (x / Theme::current().layout.browser_grid_cell_width) < columns as f32
                 {
-                    Some((y / Theme::current().layout.browser_grid_cell_height) as usize * columns + (x / Theme::current().layout.browser_grid_cell_width) as usize)
+                    Some(
+                        (y / Theme::current().layout.browser_grid_cell_height) as usize * columns
+                            + (x / Theme::current().layout.browser_grid_cell_width) as usize,
+                    )
                 } else {
                     None
                 }
@@ -1736,22 +1921,25 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
 fn maximum_scroll(layout: &Layout, state: &FilesState) -> f32 {
     let count = state.browser.entries().len();
     let content_height = match state.browser.view_mode() {
-        ViewMode::List => Theme::current().layout.compact_control_height + count as f32 * Theme::current().layout.control_height,
+        ViewMode::List => {
+            Theme::current().layout.compact_control_height
+                + count as f32 * Theme::current().layout.control_height
+        }
         ViewMode::Grid => {
             let columns = grid_column_count(layout.content);
-            GRID_HEADER_HEIGHT + 20.0 + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
+            GRID_HEADER_HEIGHT
+                + 20.0
+                + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
         }
     };
     (content_height - layout.content.size.height).max(0.0)
 }
 
 fn grid_column_count(content: Rect) -> usize {
-    ((content.size.width - GRID_SIDE_INSET * 2.0)
-        / Theme::current().layout.browser_grid_cell_width)
+    ((content.size.width - GRID_SIDE_INSET * 2.0) / Theme::current().layout.browser_grid_cell_width)
         .floor()
         .max(1.0) as usize
 }
-
 
 #[cfg(test)]
 mod tests {

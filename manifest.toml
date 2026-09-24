@@ -19,6 +19,8 @@ requires = [
     "fs.write.removable",
     "fs.write.tmp",
     "fs.write.user",
+    "file-association.read",
+    "file-association.write",
     "ipc.client",
     "ipc.server",
     "window.create",
