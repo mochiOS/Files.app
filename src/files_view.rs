@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -6,12 +7,12 @@ use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use crate::file_association::{self, Handler as AssociationHandler};
 use crate::sidebar::SidebarBookmarks;
 use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
-use viewkit::components::{Icon, IconName, Rectangle, RectangleColor, Svg, Text};
+use viewkit::components::{Icon, IconName, Image, Rectangle, RectangleColor, Svg, Text};
 use viewkit::draw_command::DrawCommand;
 use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventResult, ViewEvent};
 use viewkit::geometry::{Point, Rect, Size};
 use viewkit::platform::{CursorIcon, Key, PointerButton};
-use viewkit::prelude::SvgData;
+use viewkit::prelude::{ImageContentMode, ImageData, SvgData};
 use viewkit::theme::{Color, Theme};
 use viewkit::typography::{TextAlignment, TextRole};
 use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
@@ -78,6 +79,7 @@ struct FileIcons {
     application: Option<SvgData>,
     folder: Option<SvgData>,
     file: Option<SvgData>,
+    documents: BTreeMap<String, ImageData>,
 }
 
 impl FileIcons {
@@ -86,7 +88,21 @@ impl FileIcons {
             application: SvgData::decode(APPLICATION_SVG).ok(),
             folder: SvgData::decode(FOLDER_SVG).ok(),
             file: SvgData::decode(FILE_SVG).ok(),
+            documents: BTreeMap::new(),
         }
+    }
+
+    fn refresh_documents(&mut self, entries: Vec<FileEntry>) {
+        self.documents = load_default_document_icons(&entries);
+    }
+
+    fn document(&self, entry: &FileEntry) -> Option<&ImageData> {
+        let extension = entry
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())?
+            .to_ascii_lowercase();
+        self.documents.get(&extension)
     }
 
     fn entry(&self, entry: &FileEntry) -> Option<&SvgData> {
@@ -113,6 +129,93 @@ impl FileIcons {
 
 fn uses_application_icon(entry: &FileEntry) -> bool {
     entry.kind == EntryKind::Application || entry.path == Path::new("/applications")
+}
+
+#[cfg(target_os = "mochios")]
+fn load_default_document_icons(entries: &[FileEntry]) -> BTreeMap<String, ImageData> {
+    let mut requested_extensions = entries
+        .iter()
+        .filter(|entry| !entry.is_directory())
+        .filter_map(|entry| {
+            entry
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+        })
+        .collect::<Vec<_>>();
+    requested_extensions.sort();
+    requested_extensions.dedup();
+
+    let applications = installed_application_icons();
+    requested_extensions
+        .into_iter()
+        .filter_map(|extension| {
+            let probe = PathBuf::from(format!("document.{extension}"));
+            let bundle_id = mochi_user_platform::workspace::resolve_association(
+                &extension,
+                file_association::content_type(&probe),
+                mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
+            )
+            .ok()?;
+            let icon = applications.get(&bundle_id)?.clone();
+            Some((extension, icon))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "mochios"))]
+fn load_default_document_icons(_entries: &[FileEntry]) -> BTreeMap<String, ImageData> {
+    BTreeMap::new()
+}
+
+#[cfg(target_os = "mochios")]
+fn installed_application_icons() -> BTreeMap<String, ImageData> {
+    let mut icons = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/applications") else {
+        return icons;
+    };
+    for entry in entries.flatten() {
+        let root = entry.path();
+        let Ok(about) = std::fs::read_to_string(root.join("about.toml")) else {
+            continue;
+        };
+        let Some(bundle_id) = metadata_string(&about, "bundle_id") else {
+            continue;
+        };
+        let Some(icon_name) = metadata_string(&about, "document_icon")
+            .or_else(|| metadata_string(&about, "icon"))
+        else {
+            continue;
+        };
+        let icon_path = root.join(icon_name);
+        let icon = if icon_path.extension().and_then(|value| value.to_str()) == Some("svg") {
+            SvgData::from_path(&icon_path)
+                .ok()
+                .and_then(|svg| ImageData::from_svg(&svg, 72, 72).ok())
+        } else {
+            ImageData::thumbnail_from_path(&icon_path, 72, 72).ok()
+        };
+        if let Some(icon) = icon {
+            icons.insert(bundle_id, icon);
+        }
+    }
+    icons
+}
+
+#[cfg(target_os = "mochios")]
+fn metadata_string(content: &str, key: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let (candidate, value) = line.split_once('=')?;
+        if candidate.trim() != key {
+            return None;
+        }
+        value
+            .trim()
+            .strip_prefix('"')?
+            .strip_suffix('"')
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn is_default_sidebar_path(home: &Path, path: &Path) -> bool {
@@ -212,6 +315,16 @@ struct NameEdit {
     replace_on_input: bool,
 }
 
+fn refresh_document_icons(state: &mut FilesState) {
+    let entries = state
+        .browser
+        .entries()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    state.icons.refresh_documents(entries);
+}
+
 pub(crate) struct FilesView {
     state: RefCell<FilesState>,
 }
@@ -224,6 +337,8 @@ impl FilesView {
             .unwrap_or_else(|| PathBuf::from("/"));
         let browser = Browser::new(initial_directory);
         let home = browser.current_dir().to_path_buf();
+        let mut icons = FileIcons::new();
+        icons.refresh_documents(browser.entries().into_iter().cloned().collect());
         let sidebar_bookmarks = SidebarBookmarks::load();
         let sidebar_items = sidebar_items(&home, &sidebar_bookmarks);
         Self {
@@ -232,7 +347,7 @@ impl FilesView {
                 home_directory: home,
                 sidebar_items,
                 sidebar_bookmarks,
-                icons: FileIcons::new(),
+                icons,
                 scroll: 0.0,
                 hover: None,
                 path_focused: false,
@@ -254,6 +369,7 @@ impl FilesView {
 
     fn navigate(state: &mut FilesState, path: impl Into<PathBuf>) -> bool {
         if state.browser.navigate(path) {
+            refresh_document_icons(state);
             state.scroll = 0.0;
             state.last_click = None;
             return true;
@@ -835,6 +951,7 @@ impl View for FilesView {
                     }
                     Some(CONTEXT_COMMAND_RELOAD) => {
                         state.browser.reload();
+                        refresh_document_icons(&mut state);
                         true
                     }
                     Some(CONTEXT_COMMAND_ADD_TO_SIDEBAR) => {
@@ -856,7 +973,10 @@ impl View for FilesView {
                         match (path, bundle_id) {
                             (Some(path), Some(bundle_id)) => {
                                 match file_association::set_default(&path, &bundle_id) {
-                                    Ok(()) => state.browser.clear_error(),
+                                    Ok(()) => {
+                                        state.browser.clear_error();
+                                        refresh_document_icons(&mut state);
+                                    }
                                     Err(error) => state.browser.report_error(error),
                                 }
                                 true
@@ -1474,7 +1594,14 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
             colors().text_secondary
         };
         let cols = list_columns(row);
-        if let Some(icon) = state.icons.entry(entry) {
+        if let Some(icon) = state.icons.document(entry) {
+            Image::new(icon.clone())
+                .content_mode(ImageContentMode::Fit)
+                .paint(
+                    Rect::new(cols[0].origin.x + 1.0, cols[0].origin.y + 5.0, 18.0, 18.0),
+                    context,
+                );
+        } else if let Some(icon) = state.icons.entry(entry) {
             Svg::new(icon.clone()).paint(
                 Rect::new(cols[0].origin.x + 1.0, cols[0].origin.y + 5.0, 18.0, 18.0),
                 context,
@@ -1615,7 +1742,14 @@ fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
                     context,
                 );
         }
-        if let Some(icon) = state.icons.entry(entry) {
+        if let Some(icon) = state.icons.document(entry) {
+            Image::new(icon.clone())
+                .content_mode(ImageContentMode::Fit)
+                .paint(
+                    Rect::new(cell.origin.x + 27.0, cell.origin.y + 8.0, 64.0, 64.0),
+                    context,
+                );
+        } else if let Some(icon) = state.icons.entry(entry) {
             Svg::new(icon.clone()).paint(
                 Rect::new(cell.origin.x + 27.0, cell.origin.y + 8.0, 64.0, 64.0),
                 context,
