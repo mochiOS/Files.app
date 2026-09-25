@@ -7,11 +7,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
+appkit = { package = "mochios-appkit", path = "../../tools/devkit/crates/appkit", default-features = false }
 viewkit = { git = "https://github.com/mochiOS/viewkit", package = "viewkit" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
 libc = { git = "https://github.com/mochiOS/libc", package = "libc" }
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "files"

@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use appkit::document::{self, AssociationRoles};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Handler {
     pub(crate) bundle_id: String,
@@ -51,18 +53,9 @@ pub(crate) fn open(path: &Path, bundle_id: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| String::from("The file path is not valid UTF-8"))?;
     let content_type = content_type(Path::new(path));
     let result = if let Some(bundle_id) = bundle_id {
-        mochi_user_platform::workspace::open_document_with(
-            path,
-            content_type,
-            bundle_id,
-            mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
-        )
+        document::open_with(path, content_type, bundle_id, AssociationRoles::EDIT)
     } else {
-        mochi_user_platform::workspace::open_document(
-            path,
-            content_type,
-            mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
-        )
+        document::open(path, content_type, AssociationRoles::EDIT)
     };
     result
         .map(|_| ())
@@ -82,21 +75,17 @@ pub(crate) fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    mochi_user_platform::workspace::association_handlers(
-        extension,
-        content_type(path),
-        mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
-    )
-    .map(|handlers| {
-        handlers
-            .into_iter()
-            .map(|handler| Handler {
-                bundle_id: handler.bundle_id,
-                name: handler.name,
-            })
-            .collect()
-    })
-    .map_err(|error| format!("Cannot find applications for this file ({error:?})"))
+    document::handlers(extension, content_type(path), AssociationRoles::EDIT)
+        .map(|handlers| {
+            handlers
+                .into_iter()
+                .map(|handler| Handler {
+                    bundle_id: handler.bundle_id,
+                    name: handler.name,
+                })
+                .collect()
+        })
+        .map_err(|error| format!("Cannot find applications for this file ({error:?})"))
 }
 
 #[cfg(not(target_os = "mochios"))]
@@ -110,11 +99,11 @@ pub(crate) fn set_default(path: &Path, bundle_id: &str) -> Result<(), String> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    mochi_user_platform::workspace::set_association(
+    document::set_default(
         extension,
         content_type(path),
         bundle_id,
-        mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
+        AssociationRoles::EDIT,
     )
     .map_err(|error| format!("Cannot change the default application ({error:?})"))
 }

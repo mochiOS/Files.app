@@ -152,10 +152,10 @@ fn load_default_document_icons(entries: &[FileEntry]) -> BTreeMap<String, ImageD
         .into_iter()
         .filter_map(|extension| {
             let probe = PathBuf::from(format!("document.{extension}"));
-            let bundle_id = mochi_user_platform::workspace::resolve_association(
+            let bundle_id = appkit::document::resolve_default(
                 &extension,
                 file_association::content_type(&probe),
-                mochi_user_platform::workspace::ASSOCIATION_ROLE_EDIT,
+                appkit::document::AssociationRoles::EDIT,
             )
             .ok()?;
             let icon = applications.get(&bundle_id)?.clone();
@@ -183,8 +183,8 @@ fn installed_application_icons() -> BTreeMap<String, ImageData> {
         let Some(bundle_id) = metadata_string(&about, "bundle_id") else {
             continue;
         };
-        let Some(icon_name) = metadata_string(&about, "document_icon")
-            .or_else(|| metadata_string(&about, "icon"))
+        let Some(icon_name) =
+            metadata_string(&about, "document_icon").or_else(|| metadata_string(&about, "icon"))
         else {
             continue;
         };
