@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
@@ -307,6 +308,8 @@ struct FilesState {
     pending_delete: Option<PathBuf>,
     open_with_path: Option<PathBuf>,
     open_with_handlers: Vec<AssociationHandler>,
+    file_acceptance: Option<Rc<dyn Fn(&Path) -> bool>>,
+    file_activation: Option<Rc<dyn Fn(&Path)>>,
 }
 
 struct NameEdit {
@@ -325,8 +328,9 @@ fn refresh_document_icons(state: &mut FilesState) {
     state.icons.refresh_documents(entries);
 }
 
+#[derive(Clone)]
 pub(crate) struct FilesView {
-    state: RefCell<FilesState>,
+    state: Rc<RefCell<FilesState>>,
 }
 
 impl FilesView {
@@ -335,14 +339,37 @@ impl FilesView {
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| PathBuf::from("/"));
+        Self::new_with_activation(initial_directory, None, None)
+    }
+
+    pub(crate) fn new_picker(
+        initial_directory: impl Into<PathBuf>,
+        file_acceptance: impl Fn(&Path) -> bool + 'static,
+        file_activation: impl Fn(&Path) + 'static,
+    ) -> Self {
+        Self::new_with_activation(
+            initial_directory.into(),
+            Some(Rc::new(file_acceptance)),
+            Some(Rc::new(file_activation)),
+        )
+    }
+
+    fn new_with_activation(
+        initial_directory: PathBuf,
+        file_acceptance: Option<Rc<dyn Fn(&Path) -> bool>>,
+        file_activation: Option<Rc<dyn Fn(&Path)>>,
+    ) -> Self {
         let browser = Browser::new(initial_directory);
-        let home = browser.current_dir().to_path_buf();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| browser.current_dir().to_path_buf());
         let mut icons = FileIcons::new();
         icons.refresh_documents(browser.entries().into_iter().cloned().collect());
         let sidebar_bookmarks = SidebarBookmarks::load();
         let sidebar_items = sidebar_items(&home, &sidebar_bookmarks);
         Self {
-            state: RefCell::new(FilesState {
+            state: Rc::new(RefCell::new(FilesState {
                 browser,
                 home_directory: home,
                 sidebar_items,
@@ -363,8 +390,22 @@ impl FilesView {
                 pending_delete: None,
                 open_with_path: None,
                 open_with_handlers: Vec::new(),
-            }),
+                file_acceptance,
+                file_activation,
+            })),
         }
+    }
+
+    pub(crate) fn current_directory(&self) -> PathBuf {
+        self.state.borrow().browser.current_dir().to_path_buf()
+    }
+
+    pub(crate) fn report_error(&self, message: impl Into<String>) {
+        self.state.borrow_mut().browser.report_error(message);
+    }
+
+    pub(crate) fn activate_selected(&self) -> bool {
+        Self::open_selected(&mut self.state.borrow_mut())
     }
 
     fn navigate(state: &mut FilesState, path: impl Into<PathBuf>) -> bool {
@@ -397,6 +438,19 @@ impl FilesView {
     fn open_path(state: &mut FilesState, entry: &FileEntry) -> bool {
         if entry.is_directory() {
             return Self::navigate(state, entry.path.clone());
+        }
+        if state
+            .file_acceptance
+            .as_ref()
+            .is_some_and(|accepts| !accepts(&entry.path))
+        {
+            state.browser.report_error("This file type is not allowed");
+            return true;
+        }
+        if let Some(activate) = state.file_activation.clone() {
+            activate(&entry.path);
+            state.browser.clear_error();
+            return true;
         }
         match file_association::open(&entry.path, None) {
             Ok(()) => {
