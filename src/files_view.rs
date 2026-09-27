@@ -178,14 +178,14 @@ fn installed_application_icons() -> BTreeMap<String, ImageData> {
     };
     for entry in entries.flatten() {
         let root = entry.path();
-        let Ok(about) = std::fs::read_to_string(root.join("about.toml")) else {
+        let Ok(manifest) = std::fs::read_to_string(root.join("manifest.toml")) else {
             continue;
         };
-        let Some(bundle_id) = metadata_string(&about, "bundle_id") else {
+        let Some(bundle_id) = metadata_string(&manifest, "id") else {
             continue;
         };
         let Some(icon_name) =
-            metadata_string(&about, "document_icon").or_else(|| metadata_string(&about, "icon"))
+            metadata_string(&manifest, "document_icon").or_else(|| metadata_string(&manifest, "icon"))
         else {
             continue;
         };

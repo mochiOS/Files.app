@@ -11,6 +11,20 @@ kind = "application"
 architecture = "x86_64"
 abi = "mochios-1"
 
+[application]
+entry = "entry.elf"
+description = "File manager"
+icon = "appicon.png"
+resources = [
+    "appicon.png",
+    "icons/folder.svg",
+    "icons/file.svg",
+    "icons/application.svg",
+    "icons/image.svg",
+    "icons/archive.svg",
+    "icons/disk.svg",
+]
+
 [[binary]]
 path = "/applications/Files.app/entry.elf"
 kind = "application"
