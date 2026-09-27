@@ -166,62 +166,60 @@ fn encode_paths(bytes: &mut Vec<u8>, paths: &[PathBuf]) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "too many bookmarks"))?;
     bytes.extend_from_slice(&count.to_le_bytes());
     for path in paths {
-            let raw = path.as_os_str().as_bytes();
-            if raw.is_empty() || raw.len() > MAX_PATH_BYTES || !path.is_absolute() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "bookmark path is invalid",
-                ));
-            }
-            let length = u32::try_from(raw.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "bookmark path is too long")
-            })?;
-            bytes.extend_from_slice(&length.to_le_bytes());
-            bytes.extend_from_slice(raw);
+        let raw = path.as_os_str().as_bytes();
+        if raw.is_empty() || raw.len() > MAX_PATH_BYTES || !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bookmark path is invalid",
+            ));
+        }
+        let length = u32::try_from(raw.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bookmark path is too long"))?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(raw);
     }
     Ok(())
 }
 
 fn decode_paths(bytes: &[u8], cursor: &mut usize) -> io::Result<Vec<PathBuf>> {
-        let count = read_u32(bytes, cursor)? as usize;
-        if count > MAX_BOOKMARKS {
+    let count = read_u32(bytes, cursor)? as usize;
+    if count > MAX_BOOKMARKS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "too many sidebar bookmarks",
+        ));
+    }
+
+    let mut paths = Vec::with_capacity(count);
+    let mut seen = HashSet::new();
+    for _ in 0..count {
+        let length = read_u32(bytes, cursor)? as usize;
+        if length == 0 || length > MAX_PATH_BYTES || *cursor + length > bytes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "too many sidebar bookmarks",
+                "invalid sidebar bookmark length",
             ));
         }
-
-        let mut paths = Vec::with_capacity(count);
-        let mut seen = HashSet::new();
-        for _ in 0..count {
-            let length = read_u32(bytes, cursor)? as usize;
-            if length == 0 || length > MAX_PATH_BYTES || *cursor + length > bytes.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid sidebar bookmark length",
-                ));
-            }
-            let path = PathBuf::from(OsString::from_vec(
-                bytes[*cursor..*cursor + length].to_vec(),
+        let path = PathBuf::from(OsString::from_vec(
+            bytes[*cursor..*cursor + length].to_vec(),
+        ));
+        *cursor += length;
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sidebar bookmark is not absolute",
             ));
-            *cursor += length;
-            if !path.is_absolute() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "sidebar bookmark is not absolute",
-                ));
-            }
-            if seen.insert(path.clone()) {
-                paths.push(path);
-            }
         }
-        Ok(paths)
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn storage_path() -> Option<PathBuf> {
     let user = std::env::var("USER").unwrap_or_else(|_| String::from("root"));
-    valid_user_name(&user)
-        .then(|| Path::new(STORAGE_ROOT).join(user).join("sidebar-v1"))
+    valid_user_name(&user).then(|| Path::new(STORAGE_ROOT).join(user).join("sidebar-v1"))
 }
 
 fn valid_user_name(value: &str) -> bool {
