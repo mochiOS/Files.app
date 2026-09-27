@@ -114,11 +114,7 @@ impl SystemPanelBody {
                 .size(TextFieldSize::Small)
                 .placeholder("File name")
                 .on_submit(move || {
-                    complete_save_selection(
-                        &submit_configuration,
-                        &submit_files,
-                        &submit_name,
-                    );
+                    complete_save_selection(&submit_configuration, &submit_files, &submit_name);
                 });
             let accept_configuration = configuration.clone();
             let accept_files = files.clone();
@@ -127,11 +123,7 @@ impl SystemPanelBody {
                 .size(ButtonSize::Small)
                 .style(ButtonStyle::Accent)
                 .on_click(move || {
-                    complete_save_selection(
-                        &accept_configuration,
-                        &accept_files,
-                        &accept_name,
-                    );
+                    complete_save_selection(&accept_configuration, &accept_files, &accept_name);
                 });
             Self {
                 files,
@@ -326,7 +318,7 @@ fn complete_system_panel(
         if SYSTEM_PANEL_COMPLETED.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return Ok(());
         }
-        let mut reply = [0u8; workspace_protocol::HEADER_LEN + 24];
+        let mut reply = vec![0u8; workspace_protocol::MAX_MESSAGE_LEN];
         let message = match mochi_user_platform::ipc::call(
             configuration.workspace_endpoint,
             &request[..request_length],
@@ -339,9 +331,22 @@ fn complete_system_panel(
             }
         };
         let reply_length = (message & 0xffff_ffff) as usize;
-        let accepted = reply
+        let response = reply
             .get(..reply_length)
-            .and_then(|bytes| workspace_protocol::decode(bytes).ok())
+            .and_then(|bytes| workspace_protocol::decode(bytes).ok());
+        if let Some(message) = response {
+            if message.opcode == workspace_protocol::OP_FILE_PANEL_OPERATION_ERROR {
+                SYSTEM_PANEL_COMPLETED.store(false, std::sync::atomic::Ordering::Release);
+                let error = workspace_protocol::decode_file_panel_finish(message.payload)
+                    .ok()
+                    .filter(|finish| finish.status == 1 && finish.token == configuration.token)
+                    .map(|finish| finish.error.to_owned())
+                    .filter(|error| !error.is_empty())
+                    .unwrap_or_else(|| String::from("The application could not use this file."));
+                return Err(error);
+            }
+        }
+        let accepted = response
             .and_then(|message| workspace_protocol::decode_status(message).ok())
             .is_some_and(|(status, _, _)| status == 0);
         if !accepted {
