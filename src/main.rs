@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
-use appkit::prelude::ContentType;
+use appcore::prelude::ContentType;
 use files_view::FilesView;
 use mochios_workspace_protocol as workspace_protocol;
 use viewkit::event::{EventContext, EventResult, ViewEvent};
@@ -353,7 +353,7 @@ fn complete_system_panel(
             SYSTEM_PANEL_COMPLETED.store(false, std::sync::atomic::Ordering::Release);
             return Err(String::from("The workspace did not accept the selection."));
         }
-        appkit::request_exit();
+        appcore::request_exit();
         Ok(())
     }
     #[cfg(not(target_os = "mochios"))]
@@ -409,7 +409,7 @@ fn main() -> Result<(), ViewKitError> {
         std::env::args().find_map(|argument| parse_system_panel_argument(&argument))
     {
         let _ = SYSTEM_PANEL.set(configuration);
-        // Prevent AppKit from recursively asking workspace.service for the
+        // Prevent AppCore from recursively asking workspace.service for the
         // panel it is currently implementing.
         unsafe { std::env::set_var("MOCHIOS_SYSTEM_FILE_PANEL", "1") };
         return run::<SystemPanelApp>();

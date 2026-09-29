@@ -7,7 +7,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-appkit = { package = "mochios-appkit", path = "../../tools/devkit/crates/appkit" }
+appcore = { package = "mochios-appcore", path = "../../tools/devkit/crates/appcore" }
 mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
 viewkit = { path = "../../libraries/viewkit" }
 

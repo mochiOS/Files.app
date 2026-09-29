@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use appkit::document::{self, AssociationRoles};
+use appcore::document::{self, AssociationRoles};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Handler {

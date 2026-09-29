@@ -153,10 +153,10 @@ fn load_default_document_icons(entries: &[FileEntry]) -> BTreeMap<String, ImageD
         .into_iter()
         .filter_map(|extension| {
             let probe = PathBuf::from(format!("document.{extension}"));
-            let bundle_id = appkit::document::resolve_default(
+            let bundle_id = appcore::document::resolve_default(
                 &extension,
                 file_association::content_type(&probe),
-                appkit::document::AssociationRoles::EDIT,
+                appcore::document::AssociationRoles::EDIT,
             )
             .ok()?;
             let icon = applications.get(&bundle_id)?.clone();
@@ -184,8 +184,8 @@ fn installed_application_icons() -> BTreeMap<String, ImageData> {
         let Some(bundle_id) = metadata_string(&manifest, "id") else {
             continue;
         };
-        let Some(icon_name) =
-            metadata_string(&manifest, "document_icon").or_else(|| metadata_string(&manifest, "icon"))
+        let Some(icon_name) = metadata_string(&manifest, "document_icon")
+            .or_else(|| metadata_string(&manifest, "icon"))
         else {
             continue;
         };
