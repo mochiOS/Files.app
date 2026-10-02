@@ -407,7 +407,11 @@ fn read_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
             continue;
         }
 
-        let metadata = entry.metadata()?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if inaccessible_entry_metadata(&error) => continue,
+            Err(error) => return Err(error),
+        };
         let kind = classify(&name, metadata.is_dir());
         let modified = metadata
             .modified()
@@ -425,6 +429,13 @@ fn read_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
 
     entries.sort_by(compare_entries);
     Ok(entries)
+}
+
+fn inaccessible_entry_metadata(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    )
 }
 
 fn compare_entries(left: &FileEntry, right: &FileEntry) -> Ordering {
@@ -659,5 +670,18 @@ mod tests {
         assert!(!browser.rename_selected("../outside"));
         assert!(target.exists());
         Ok(())
+    }
+
+    #[test]
+    fn inaccessible_entry_metadata_is_skipped() {
+        assert!(inaccessible_entry_metadata(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(inaccessible_entry_metadata(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!inaccessible_entry_metadata(&std::io::Error::from(
+            std::io::ErrorKind::InvalidData
+        )));
     }
 }
