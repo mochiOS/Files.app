@@ -156,7 +156,7 @@ fn load_default_document_icons(entries: &[FileEntry]) -> BTreeMap<String, ImageD
             let bundle_id = appcore::document::resolve_default(
                 &extension,
                 file_association::content_type(&probe),
-                appcore::document::AssociationRoles::EDIT,
+                appcore::document::AssociationRoles::VIEW,
             )
             .ok()?;
             let icon = applications.get(&bundle_id)?.clone();
@@ -173,32 +173,34 @@ fn load_default_document_icons(_entries: &[FileEntry]) -> BTreeMap<String, Image
 #[cfg(target_os = "mochios")]
 fn installed_application_icons() -> BTreeMap<String, ImageData> {
     let mut icons = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir("/applications") else {
-        return icons;
-    };
-    for entry in entries.flatten() {
-        let root = entry.path();
-        let Ok(manifest) = std::fs::read_to_string(root.join("manifest.toml")) else {
+    for applications_root in ["/system/applications", "/applications"] {
+        let Ok(entries) = std::fs::read_dir(applications_root) else {
             continue;
         };
-        let Some(bundle_id) = metadata_string(&manifest, "id") else {
-            continue;
-        };
-        let Some(icon_name) = metadata_string(&manifest, "document_icon")
-            .or_else(|| metadata_string(&manifest, "icon"))
-        else {
-            continue;
-        };
-        let icon_path = root.join(icon_name);
-        let icon = if icon_path.extension().and_then(|value| value.to_str()) == Some("svg") {
-            SvgData::from_path(&icon_path)
-                .ok()
-                .and_then(|svg| ImageData::from_svg(&svg, 72, 72).ok())
-        } else {
-            ImageData::thumbnail_from_path(&icon_path, 72, 72).ok()
-        };
-        if let Some(icon) = icon {
-            icons.insert(bundle_id, icon);
+        for entry in entries.flatten() {
+            let root = entry.path();
+            let Ok(manifest) = std::fs::read_to_string(root.join("manifest.toml")) else {
+                continue;
+            };
+            let Some(bundle_id) = metadata_string(&manifest, "id") else {
+                continue;
+            };
+            let Some(icon_name) = metadata_string(&manifest, "document_icon")
+                .or_else(|| metadata_string(&manifest, "icon"))
+            else {
+                continue;
+            };
+            let icon_path = root.join(icon_name);
+            let icon = if icon_path.extension().and_then(|value| value.to_str()) == Some("svg") {
+                SvgData::from_path(&icon_path)
+                    .ok()
+                    .and_then(|svg| ImageData::from_svg(&svg, 72, 72).ok())
+            } else {
+                ImageData::thumbnail_from_path(&icon_path, 72, 72).ok()
+            };
+            if let Some(icon) = icon {
+                icons.entry(bundle_id).or_insert(icon);
+            }
         }
     }
     icons

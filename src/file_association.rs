@@ -53,9 +53,9 @@ pub(crate) fn open(path: &Path, bundle_id: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| String::from("The file path is not valid UTF-8"))?;
     let content_type = content_type(Path::new(path));
     let result = if let Some(bundle_id) = bundle_id {
-        document::open_with(path, content_type, bundle_id, AssociationRoles::EDIT)
+        document::open_with(path, content_type, bundle_id, AssociationRoles::VIEW)
     } else {
-        document::open(path, content_type, AssociationRoles::EDIT)
+        document::open(path, content_type, AssociationRoles::VIEW)
     };
     result
         .map(|_| ())
@@ -75,7 +75,7 @@ pub(crate) fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    document::handlers(extension, content_type(path), AssociationRoles::EDIT)
+    document::handlers(extension, content_type(path), AssociationRoles::VIEW)
         .map(|handlers| {
             handlers
                 .into_iter()
@@ -103,7 +103,7 @@ pub(crate) fn set_default(path: &Path, bundle_id: &str) -> Result<(), String> {
         extension,
         content_type(path),
         bundle_id,
-        AssociationRoles::EDIT,
+        AssociationRoles::VIEW,
     )
     .map_err(|error| format!("Cannot change the default application ({error:?})"))
 }
