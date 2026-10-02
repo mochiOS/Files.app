@@ -26,7 +26,7 @@ resources = [
 ]
 
 [[binary]]
-path = "/applications/Files.app/entry.elf"
+path = "/system/applications/Files.app/entry.elf"
 kind = "application"
 requires = [
     "clipboard.read",
