@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use appcore::Alert;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ViewMode {
     List,
@@ -59,7 +61,6 @@ impl FileEntry {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct Browser {
     current_dir: PathBuf,
     preview_root: Option<PathBuf>,
@@ -69,7 +70,7 @@ pub(crate) struct Browser {
     search: String,
     selected: Option<PathBuf>,
     view_mode: ViewMode,
-    error: Option<String>,
+    alert: Alert,
 }
 
 impl Browser {
@@ -93,7 +94,7 @@ impl Browser {
             search: String::new(),
             selected: None,
             view_mode: ViewMode::Grid,
-            error: None,
+            alert: Alert::new(),
         };
         browser.reload();
         browser
@@ -154,16 +155,13 @@ impl Browser {
         self.view_mode = view_mode;
     }
 
-    pub(crate) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
     pub(crate) fn report_error(&mut self, message: impl Into<String>) {
-        self.error = Some(message.into());
+        self.alert
+            .present_error("The operation could not be completed.", message);
     }
 
     pub(crate) fn clear_error(&mut self) {
-        self.error = None;
+        self.alert.dismiss();
     }
 
     pub(crate) fn can_go_back(&self) -> bool {
@@ -178,17 +176,17 @@ impl Browser {
         let mut path = normalize_path(path.into());
         if let Some(root) = &self.preview_root {
             let Ok(canonical) = fs::canonicalize(&path) else {
-                self.error = Some(format!("Cannot open {}", path.display()));
+                self.report_error(format!("Cannot open {}", path.display()));
                 return false;
             };
             if !canonical.starts_with(root) {
-                self.error = Some("Preview is limited to its sample folder".to_owned());
+                self.report_error("Preview is limited to its sample folder");
                 return false;
             }
             path = canonical;
         }
         let Ok(entries) = read_entries(&path) else {
-            self.error = Some(format!("Cannot open {}", path.display()));
+            self.report_error(format!("Cannot open {}", path.display()));
             return false;
         };
 
@@ -226,7 +224,7 @@ impl Browser {
             Err(error) => {
                 self.entries.clear();
                 self.selected = None;
-                self.error = Some(format!(
+                self.report_error(format!(
                     "Cannot read {}: {error}",
                     self.current_dir.display()
                 ));
@@ -296,16 +294,16 @@ impl Browser {
             return false;
         };
         if !valid_entry_name(name) || source.parent() != Some(self.current_dir.as_path()) {
-            self.error = Some("The name is not valid".to_owned());
+            self.report_error("The name is not valid");
             return false;
         }
         let destination = self.current_dir.join(name);
         if destination == source {
-            self.error = None;
+            self.clear_error();
             return true;
         }
         if destination.exists() {
-            self.error = Some(format!("{} already exists", destination.display()));
+            self.report_error(format!("{} already exists", destination.display()));
             return false;
         }
         match fs::rename(&source, &destination) {
@@ -325,7 +323,7 @@ impl Browser {
             return false;
         };
         if path.parent() != Some(self.current_dir.as_path()) {
-            self.error = Some("The selected item cannot be deleted".to_owned());
+            self.report_error("The selected item cannot be deleted");
             return false;
         }
         match remove_path_tree(&path) {
@@ -346,12 +344,12 @@ impl Browser {
                 self.entries = entries;
                 self.search.clear();
                 self.selected = selected;
-                self.error = None;
+                self.clear_error();
             }
             Err(error) => {
                 self.entries.clear();
                 self.selected = None;
-                self.error = Some(format!(
+                self.report_error(format!(
                     "Cannot read {}: {error}",
                     self.current_dir.display()
                 ));
@@ -360,7 +358,7 @@ impl Browser {
     }
 
     fn set_operation_error(&mut self, operation: &str, path: &Path, error: std::io::Error) {
-        self.error = Some(format!("Cannot {operation} {}: {error}", path.display()));
+        self.report_error(format!("Cannot {operation} {}: {error}", path.display()));
     }
 
     fn load_history(&mut self, index: usize) -> bool {
@@ -368,7 +366,7 @@ impl Browser {
             return false;
         };
         let Ok(entries) = read_entries(&path) else {
-            self.error = Some(format!("Cannot open {}", path.display()));
+            self.report_error(format!("Cannot open {}", path.display()));
             return false;
         };
         self.history_index = index;
@@ -381,7 +379,7 @@ impl Browser {
         self.entries = entries;
         self.search.clear();
         self.selected = None;
-        self.error = None;
+        self.clear_error();
     }
 }
 

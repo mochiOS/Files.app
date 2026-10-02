@@ -1536,22 +1536,6 @@ fn paint_content(layout: &Layout, state: &FilesState, context: &mut PaintContext
         ViewMode::List => paint_list(layout, state, context),
         ViewMode::Grid => paint_grid(layout, state, context),
     }
-    if let Some(error) = state.browser.error() {
-        paint_text(
-            error,
-            Rect::new(
-                layout.content.origin.x + 28.0,
-                layout.content.origin.y + 56.0,
-                layout.content.size.width - 56.0,
-                44.0,
-            ),
-            TextRole::Body,
-            None,
-            colors().text_secondary,
-            TextAlignment::Center,
-            context,
-        );
-    }
     context.display_list.push(DrawCommand::PopClip);
 }
 
