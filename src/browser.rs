@@ -407,22 +407,32 @@ fn read_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
             continue;
         }
 
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if inaccessible_entry_metadata(&error) => continue,
+        let (is_directory, size, modified) = match entry.metadata() {
+            Ok(metadata) => (
+                metadata.is_dir(),
+                metadata.len(),
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(format_modified)
+                    .unwrap_or_else(|| "--".to_owned()),
+            ),
+            Err(error) if inaccessible_entry_metadata(&error) => (
+                entry
+                    .file_type()
+                    .map(|file_type| file_type.is_dir())
+                    .unwrap_or(false),
+                0,
+                "--".to_owned(),
+            ),
             Err(error) => return Err(error),
         };
-        let kind = classify(&name, metadata.is_dir());
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(format_modified)
-            .unwrap_or_else(|| "--".to_owned());
+        let kind = classify(&name, is_directory);
         entries.push(FileEntry {
             path: entry.path(),
             name,
             kind,
-            size: metadata.len(),
+            size,
             modified,
         });
     }
@@ -673,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn inaccessible_entry_metadata_is_skipped() {
+    fn identifies_metadata_errors_that_use_directory_entry_fallback() {
         assert!(inaccessible_entry_metadata(&std::io::Error::from(
             std::io::ErrorKind::PermissionDenied
         )));
