@@ -218,6 +218,10 @@ fn decode_paths(bytes: &[u8], cursor: &mut usize) -> io::Result<Vec<PathBuf>> {
 }
 
 fn storage_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(root) = std::env::var_os("MOCHIOS_PREVIEW_CONFIG_ROOT") {
+        return Some(PathBuf::from(root).join("files/preferences"));
+    }
     let user = std::env::var("USER").unwrap_or_else(|_| String::from("root"));
     valid_user_name(&user).then(|| Path::new(STORAGE_ROOT).join(user).join("sidebar-v1"))
 }
