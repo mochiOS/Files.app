@@ -100,6 +100,10 @@ impl Browser {
         browser
     }
 
+    pub(crate) fn root_directory(&self) -> &Path {
+        self.preview_root.as_deref().unwrap_or(Path::new("/"))
+    }
+
     pub(crate) fn current_dir(&self) -> &Path {
         &self.current_dir
     }

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use crate::file_association::{self, Handler as AssociationHandler};
+use crate::folder_tree::FolderTree;
 use crate::sidebar::SidebarBookmarks;
 use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
 use viewkit::components::{Icon, IconName, Image, Rectangle, RectangleColor, Svg, Text};
@@ -269,6 +270,8 @@ enum HitTarget {
     Path,
     Search,
     Sidebar(usize),
+    TreeExpand(usize),
+    TreeNavigate(usize),
     Entry(usize),
     Content,
 }
@@ -282,7 +285,9 @@ fn request_hover_redraw(
         return;
     };
     let region = match target {
-        HitTarget::Sidebar(_) => layout.sidebar,
+        HitTarget::Sidebar(_) | HitTarget::TreeExpand(_) | HitTarget::TreeNavigate(_) => {
+            layout.sidebar
+        }
         HitTarget::Entry(_) | HitTarget::Content => layout.content,
         _ => layout.toolbar,
     };
@@ -294,6 +299,8 @@ struct FilesState {
     home_directory: PathBuf,
     sidebar_items: Vec<SidebarItem>,
     sidebar_bookmarks: SidebarBookmarks,
+    folder_tree: FolderTree,
+    sidebar_scroll: f32,
     icons: FileIcons,
     scroll: f32,
     hover: Option<HitTarget>,
@@ -311,7 +318,7 @@ struct FilesState {
     open_with_path: Option<PathBuf>,
     open_with_handlers: Vec<AssociationHandler>,
     file_acceptance: Option<Rc<dyn Fn(&Path) -> bool>>,
-    file_activation: Option<Rc<dyn Fn(&Path)>>,
+    file_activation: Option<Rc<dyn Fn(&Path) -> Result<(), String>>>,
 }
 
 struct NameEdit {
@@ -337,7 +344,8 @@ pub(crate) struct FilesView {
 
 impl FilesView {
     pub(crate) fn new() -> Self {
-        let initial_directory = std::env::var_os("HOME")
+        let initial_directory = std::env::var_os("MOCHIOS_PREVIEW_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| PathBuf::from("/"));
@@ -347,7 +355,7 @@ impl FilesView {
     pub(crate) fn new_picker(
         initial_directory: impl Into<PathBuf>,
         file_acceptance: impl Fn(&Path) -> bool + 'static,
-        file_activation: impl Fn(&Path) + 'static,
+        file_activation: impl Fn(&Path) -> Result<(), String> + 'static,
     ) -> Self {
         Self::new_with_activation(
             initial_directory.into(),
@@ -359,10 +367,11 @@ impl FilesView {
     fn new_with_activation(
         initial_directory: PathBuf,
         file_acceptance: Option<Rc<dyn Fn(&Path) -> bool>>,
-        file_activation: Option<Rc<dyn Fn(&Path)>>,
+        file_activation: Option<Rc<dyn Fn(&Path) -> Result<(), String>>>,
     ) -> Self {
         let browser = Browser::new(initial_directory);
-        let home = std::env::var_os("HOME")
+        let home = std::env::var_os("MOCHIOS_PREVIEW_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| browser.current_dir().to_path_buf());
@@ -370,12 +379,15 @@ impl FilesView {
         icons.refresh_documents(browser.entries().into_iter().cloned().collect());
         let sidebar_bookmarks = SidebarBookmarks::load();
         let sidebar_items = sidebar_items(&home, &sidebar_bookmarks);
+        let folder_tree = FolderTree::new(browser.root_directory().to_path_buf());
         Self {
             state: Rc::new(RefCell::new(FilesState {
                 browser,
                 home_directory: home,
                 sidebar_items,
                 sidebar_bookmarks,
+                folder_tree,
+                sidebar_scroll: 0.0,
                 icons,
                 scroll: 0.0,
                 hover: None,
@@ -450,8 +462,10 @@ impl FilesView {
             return true;
         }
         if let Some(activate) = state.file_activation.clone() {
-            activate(&entry.path);
-            state.browser.clear_error();
+            match activate(&entry.path) {
+                Ok(()) => state.browser.clear_error(),
+                Err(error) => state.browser.report_error(error),
+            }
             return true;
         }
         match file_association::open(&entry.path, None) {
@@ -694,6 +708,26 @@ impl View for FilesView {
                     Some(HitTarget::Sidebar(index)) => {
                         Self::activate_sidebar_item(&mut state, index)
                     }
+                    Some(HitTarget::TreeExpand(index)) => {
+                        if let Some(row) = state.folder_tree.rows().get(index) {
+                            let path = row.path.clone();
+                            if let Err(error) = state.folder_tree.toggle(&path) {
+                                state
+                                    .browser
+                                    .report_error(format!("Cannot expand folder: {error}"));
+                            }
+                            state.sidebar_scroll = state
+                                .sidebar_scroll
+                                .min(maximum_sidebar_scroll(&layout, &state));
+                        }
+                        true
+                    }
+                    Some(HitTarget::TreeNavigate(index)) => state
+                        .folder_tree
+                        .rows()
+                        .get(index)
+                        .map(|row| row.path.clone())
+                        .is_some_and(|path| Self::navigate(&mut state, path)),
                     Some(HitTarget::Entry(index)) => Self::activate_entry(&mut state, index),
                     Some(HitTarget::Content) => {
                         state.browser.clear_selection();
@@ -1071,6 +1105,15 @@ impl View for FilesView {
             }
             ViewEvent::Scroll {
                 position, delta_y, ..
+            } if layout.sidebar.contains(*position) => {
+                let mut state = self.state.borrow_mut();
+                let maximum = maximum_sidebar_scroll(&layout, &state);
+                state.sidebar_scroll = (state.sidebar_scroll - *delta_y * 36.0).clamp(0.0, maximum);
+                context.request_redraw_in(layout.sidebar);
+                EventResult::Consumed
+            }
+            ViewEvent::Scroll {
+                position, delta_y, ..
             } if layout.content.contains(*position) => {
                 let mut state = self.state.borrow_mut();
                 let maximum = maximum_scroll(&layout, &state);
@@ -1428,6 +1471,28 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
     );
 }
 
+fn tree_start_y(layout: &Layout, state: &FilesState) -> f32 {
+    layout.sidebar.origin.y + 42.0 + state.sidebar_items.len() as f32 * 34.0 + 24.0
+        - state.sidebar_scroll
+}
+fn tree_row_rect(layout: &Layout, state: &FilesState, index: usize) -> Rect {
+    Rect::new(
+        layout.sidebar.origin.x + 8.0,
+        tree_start_y(layout, state) + index as f32 * 32.0,
+        layout.sidebar_width - 16.0,
+        30.0,
+    )
+}
+fn maximum_sidebar_scroll(layout: &Layout, state: &FilesState) -> f32 {
+    (42.0
+        + state.sidebar_items.len() as f32 * 34.0
+        + 24.0
+        + state.folder_tree.rows().len() as f32 * 32.0
+        + 12.0
+        - layout.sidebar.size.height)
+        .max(0.0)
+}
+
 fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     Rectangle::new()
         .color(RectangleColor::Custom(colors().sidebar_background))
@@ -1443,11 +1508,14 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
         width: 1.0,
     });
 
+    context.display_list.push(DrawCommand::PushClip {
+        rect: layout.sidebar,
+    });
     paint_text(
         "Favorites",
         Rect::new(
             layout.sidebar.origin.x + 16.0,
-            layout.sidebar.origin.y + 16.0,
+            layout.sidebar.origin.y + 16.0 - state.sidebar_scroll,
             layout.sidebar_width - 30.0,
             18.0,
         ),
@@ -1463,10 +1531,92 @@ fn paint_sidebar(layout: &Layout, state: &FilesState, context: &mut PaintContext
             state,
             index,
             item,
-            42.0 + index as f32 * 34.0,
+            42.0 + index as f32 * 34.0 - state.sidebar_scroll,
             context,
         );
     }
+    let top = tree_start_y(layout, state);
+    Rectangle::new()
+        .color(RectangleColor::Custom(colors().border))
+        .paint(
+            Rect::new(
+                layout.sidebar.origin.x + 12.0,
+                top - 12.0,
+                layout.sidebar_width - 24.0,
+                1.0,
+            ),
+            context,
+        );
+    for (index, row) in state.folder_tree.rows().iter().enumerate() {
+        let rect = tree_row_rect(layout, state, index);
+        if rect.intersection(layout.sidebar).is_none() {
+            continue;
+        }
+        let indent = (row.depth as f32 * 16.0).min((layout.sidebar_width - 90.0).max(0.0));
+        let selected = state.browser.current_dir() == row.path;
+        let hovered = matches!(state.hover, Some(HitTarget::TreeExpand(i) | HitTarget::TreeNavigate(i)) if i == index);
+        if selected || hovered {
+            Rectangle::new()
+                .color(RectangleColor::Custom(if selected {
+                    colors().sidebar_selection
+                } else {
+                    colors().sidebar_hover
+                }))
+                .radius(viewkit::theme::CornerRadius::Small)
+                .paint(rect, context);
+        }
+        let arrow = Rect::new(
+            rect.origin.x + indent,
+            rect.origin.y,
+            20.0,
+            rect.size.height,
+        );
+        if row.expandable {
+            Icon::new(if row.expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(10.0)
+            .color(colors().text_secondary)
+            .paint(arrow, context);
+        }
+        if let Some(icon) = state.icons.sidebar(SidebarIcon::Folder) {
+            Svg::new(icon.clone()).paint(
+                Rect::new(arrow.origin.x + 22.0, rect.origin.y + 5.0, 20.0, 20.0),
+                context,
+            );
+        }
+        let title = if row.depth == 0 {
+            String::from("/")
+        } else {
+            row.path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        paint_text(
+            title.clone(),
+            Rect::new(
+                arrow.origin.x + 48.0,
+                rect.origin.y + 4.0,
+                (rect.size.width - indent - 50.0).max(0.0),
+                22.0,
+            ),
+            TextRole::Label,
+            selected.then_some(600),
+            colors().text_primary,
+            TextAlignment::Start,
+            context,
+        );
+        let mut node = AccessibilityNode::new(AccessibilityRole::ListItem, rect);
+        node.label = Some(title);
+        node.value = Some(row.path.display().to_string());
+        node.selected = selected;
+        context.record_accessibility(node);
+    }
+    context.display_list.push(DrawCommand::PopClip);
 }
 
 fn paint_sidebar_item(
@@ -1694,7 +1844,9 @@ fn paint_list(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_
 
 fn paint_grid(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     let directory = state.browser.current_dir();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = std::env::var_os("MOCHIOS_PREVIEW_ROOT")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
     let preview_home = std::env::var_os("MOCHIOS_PREVIEW_ROOT").map(PathBuf::from);
     let title = if home.as_deref() == Some(directory)
         || preview_home.as_deref() == Some(directory)
@@ -2042,12 +2194,27 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
         for index in 0..state.sidebar_items.len() {
             let row = Rect::new(
                 layout.sidebar.origin.x + 8.0,
-                layout.sidebar.origin.y + 42.0 + index as f32 * 34.0,
+                layout.sidebar.origin.y + 42.0 + index as f32 * 34.0 - state.sidebar_scroll,
                 layout.sidebar_width - 16.0,
                 29.0,
             );
             if row.contains(point) {
                 return Some(HitTarget::Sidebar(index));
+            }
+        }
+    }
+    if layout.sidebar.contains(point) {
+        for (index, row) in state.folder_tree.rows().iter().enumerate() {
+            let rect = tree_row_rect(layout, state, index);
+            if rect.contains(point) {
+                let indent = (row.depth as f32 * 16.0).min((layout.sidebar_width - 90.0).max(0.0));
+                return Some(
+                    if point.x < rect.origin.x + indent + 20.0 && row.expandable {
+                        HitTarget::TreeExpand(index)
+                    } else {
+                        HitTarget::TreeNavigate(index)
+                    },
+                );
             }
         }
     }

@@ -1,9 +1,11 @@
 mod browser;
 mod file_association;
 mod files_view;
+mod folder_tree;
 mod sidebar;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
@@ -14,13 +16,17 @@ use viewkit::event::{EventContext, EventResult, ViewEvent};
 use viewkit::prelude::*;
 use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
-struct FilesApp;
+struct FilesApp {
+    files: FilesView,
+}
 
 impl App for FilesApp {
     type Body = FilesView;
 
     fn new() -> Self {
-        Self
+        Self {
+            files: FilesView::new(),
+        }
     }
 
     fn window(&self) -> WindowOptions {
@@ -30,7 +36,7 @@ impl App for FilesApp {
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
-        FilesView::new()
+        self.files.clone()
     }
 }
 
@@ -48,11 +54,12 @@ struct SystemPanelConfiguration {
 static SYSTEM_PANEL: OnceLock<SystemPanelConfiguration> = OnceLock::new();
 static SYSTEM_PANEL_COMPLETED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone)]
 struct SystemPanelBody {
     files: FilesView,
-    name_field: Option<TextField>,
-    cancel: Button,
-    accept: Button,
+    name_field: Option<Rc<TextField>>,
+    cancel: Rc<Button>,
+    accept: Rc<Button>,
 }
 
 impl SystemPanelBody {
@@ -72,9 +79,7 @@ impl SystemPanelBody {
             let files = FilesView::new_picker(
                 initial_directory,
                 move |path| path_matches_content_types(path, &allowed_content_types),
-                move |path| {
-                    let _ = complete_system_panel(&activated_configuration, 0, path);
-                },
+                move |path| complete_system_panel(&activated_configuration, 0, path),
             );
             let accept_files = files.clone();
             let accept = Button::new("Open")
@@ -88,8 +93,8 @@ impl SystemPanelBody {
             Self {
                 files,
                 name_field: None,
-                cancel,
-                accept,
+                cancel: Rc::new(cancel),
+                accept: Rc::new(accept),
             }
         } else {
             let name = TextFieldInteractionState::new();
@@ -105,6 +110,7 @@ impl SystemPanelBody {
                         activated_name.set_value(file_name);
                         activated_name.set_focused(true);
                     }
+                    Ok(())
                 },
             );
             let submit_configuration = configuration.clone();
@@ -127,9 +133,9 @@ impl SystemPanelBody {
                 });
             Self {
                 files,
-                name_field: Some(name_field),
-                cancel,
-                accept,
+                name_field: Some(Rc::new(name_field)),
+                cancel: Rc::new(cancel),
+                accept: Rc::new(accept),
             }
         }
     }
@@ -171,7 +177,8 @@ fn panel_initial_directory(configuration: &SystemPanelConfiguration) -> PathBuf 
     if requested.is_dir() {
         requested
     } else {
-        std::env::var_os("HOME")
+        std::env::var_os("MOCHIOS_PREVIEW_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| PathBuf::from("/"))
@@ -256,13 +263,22 @@ impl View for SystemPanelBody {
     }
 }
 
-struct SystemPanelApp;
+struct SystemPanelApp {
+    body: SystemPanelBody,
+}
 
 impl App for SystemPanelApp {
     type Body = SystemPanelBody;
 
     fn new() -> Self {
-        Self
+        Self {
+            body: SystemPanelBody::new(
+                SYSTEM_PANEL
+                    .get()
+                    .expect("system panel configuration")
+                    .clone(),
+            ),
+        }
     }
 
     fn window(&self) -> WindowOptions {
@@ -273,11 +289,7 @@ impl App for SystemPanelApp {
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
-        let configuration = SYSTEM_PANEL
-            .get()
-            .expect("system panel configuration")
-            .clone();
-        SystemPanelBody::new(configuration)
+        self.body.clone()
     }
 
     fn close_requested(&mut self) -> bool {
@@ -356,7 +368,38 @@ fn complete_system_panel(
         appcore::request_exit();
         Ok(())
     }
-    #[cfg(not(target_os = "mochios"))]
+    #[cfg(target_os = "linux")]
+    {
+        use viewkit::platform::linux::preview::{Connection, Packet};
+        if SYSTEM_PANEL_COMPLETED.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let _ = configuration;
+        let socket = std::env::var_os("MOCHIOS_PREVIEW_FILE_PANEL_REPLY")
+            .ok_or_else(|| "The file panel has no application connection.".to_owned())?;
+        let stream =
+            std::os::unix::net::UnixStream::connect(socket).map_err(|error| error.to_string())?;
+        let mut connection = Connection::new(stream).map_err(|error| error.to_string())?;
+        connection
+            .send(Packet::FilePanelSelection {
+                path: (status == 0).then(|| path.to_path_buf()),
+            })
+            .map_err(|error| error.to_string())?;
+        loop {
+            for packet in connection.poll().map_err(|error| error.to_string())? {
+                if let Packet::FilePanelOperation { error } = packet {
+                    if let Some(error) = error {
+                        return Err(error);
+                    }
+                    SYSTEM_PANEL_COMPLETED.store(true, std::sync::atomic::Ordering::Release);
+                    appcore::request_exit();
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+    }
+    #[cfg(not(any(target_os = "mochios", target_os = "linux")))]
     {
         let _ = (configuration, status, path);
         Err(String::from("System file panels are available on mochiOS."))
