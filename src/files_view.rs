@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -6,10 +6,14 @@ use std::time::{Duration, Instant};
 
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use crate::file_association::{self, Handler as AssociationHandler};
+use crate::file_clipboard;
 use crate::folder_tree::FolderTree;
+use crate::operations::{Collision, Kind, Operation, Outcome};
 use crate::sidebar::SidebarBookmarks;
 use viewkit::accessibility::{AccessibilityNode, AccessibilityRole};
-use viewkit::components::{Icon, IconName, Image, Rectangle, RectangleColor, Svg, Text};
+use viewkit::components::{
+    Button, ButtonSize, ButtonStyle, Icon, IconName, Image, Rectangle, RectangleColor, Svg, Text,
+};
 use viewkit::draw_command::DrawCommand;
 use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventResult, ViewEvent};
 use viewkit::geometry::{Point, Rect, Size};
@@ -37,6 +41,9 @@ const CONTEXT_COMMAND_ADD_TO_SIDEBAR: u32 = 8;
 const CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR: u32 = 9;
 const CONTEXT_COMMAND_OPEN_WITH: u32 = 10;
 const CONTEXT_COMMAND_SET_DEFAULT: u32 = 11;
+const CONTEXT_COMMAND_COPY: u32 = 12;
+const CONTEXT_COMMAND_CUT: u32 = 13;
+const CONTEXT_COMMAND_PASTE: u32 = 14;
 const CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER: u32 = 1_000;
 const CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER: u32 = 2_000;
 
@@ -315,6 +322,7 @@ struct FilesState {
     context_sidebar_path: Option<PathBuf>,
     name_edit: Option<NameEdit>,
     pending_delete: Option<PathBuf>,
+    operation: Option<Operation>,
     open_with_path: Option<PathBuf>,
     open_with_handlers: Vec<AssociationHandler>,
     file_acceptance: Option<Rc<dyn Fn(&Path) -> bool>>,
@@ -340,6 +348,16 @@ fn refresh_document_icons(state: &mut FilesState) {
 #[derive(Clone)]
 pub(crate) struct FilesView {
     state: Rc<RefCell<FilesState>>,
+    operation_action: Rc<Cell<Option<OperationAction>>>,
+    operation_buttons: Rc<Vec<Button>>,
+}
+
+#[derive(Clone, Copy)]
+enum OperationAction {
+    Cancel,
+    Replace,
+    KeepBoth,
+    Skip,
 }
 
 impl FilesView {
@@ -380,7 +398,25 @@ impl FilesView {
         let sidebar_bookmarks = SidebarBookmarks::load();
         let sidebar_items = sidebar_items(&home, &sidebar_bookmarks);
         let folder_tree = FolderTree::new(browser.root_directory().to_path_buf());
+        let operation_action = Rc::new(Cell::new(None));
+        let operation_buttons = [
+            ("Cancel", OperationAction::Cancel),
+            ("Replace", OperationAction::Replace),
+            ("Keep Both", OperationAction::KeepBoth),
+            ("Skip", OperationAction::Skip),
+        ]
+        .into_iter()
+        .map(|(label, action)| {
+            let pending = operation_action.clone();
+            Button::new(label)
+                .size(ButtonSize::Small)
+                .style(ButtonStyle::Standard)
+                .on_click(move || pending.set(Some(action)))
+        })
+        .collect();
         Self {
+            operation_action,
+            operation_buttons: Rc::new(operation_buttons),
             state: Rc::new(RefCell::new(FilesState {
                 browser,
                 home_directory: home,
@@ -402,6 +438,7 @@ impl FilesView {
                 context_sidebar_path: None,
                 name_edit: None,
                 pending_delete: None,
+                operation: None,
                 open_with_path: None,
                 open_with_handlers: Vec::new(),
                 file_acceptance,
@@ -589,6 +626,98 @@ impl FilesView {
         }
     }
 
+    fn clipboard_selection(state: &mut FilesState, kind: Kind) -> bool {
+        if let Some(path) = state.browser.selected() {
+            if let Err(error) = file_clipboard::set(kind, path) {
+                state.browser.report_error(error);
+            }
+        }
+        true
+    }
+
+    fn start_operation(state: &mut FilesState, kind: Kind, source: PathBuf) -> bool {
+        if state.operation.is_some() || !Self::commit_name_edit(state) {
+            return false;
+        }
+        // The preview must never modify files outside its isolated home.
+        let root = state.browser.root_directory();
+        if !source
+            .parent()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .is_some_and(|p| p.starts_with(root))
+            || source.file_name().is_none()
+        {
+            state
+                .browser
+                .report_error("The item is outside the available filesystem");
+            return true;
+        }
+        match Operation::new(kind, source, state.browser.current_dir()) {
+            Ok(operation) => state.operation = Some(operation),
+            Err(error) => state.browser.report_error(error.to_string()),
+        }
+        true
+    }
+
+    fn paste(state: &mut FilesState) -> bool {
+        if let Some((kind, source)) = file_clipboard::get() {
+            Self::start_operation(state, kind, source)
+        } else {
+            false
+        }
+    }
+
+    fn operation_frame(bounds: Rect) -> Rect {
+        let content = Layout::new(bounds).content;
+        Rect::new(
+            content.origin.x,
+            (bounds.origin.y + bounds.size.height - 88.0).max(content.origin.y),
+            content.size.width,
+            88.0_f32.min(content.size.height),
+        )
+    }
+
+    fn operation_button(frame: Rect, index: usize) -> Rect {
+        let width = ((frame.size.width - 40.0) / 4.0).clamp(0.0, 84.0);
+        Rect::new(
+            frame.origin.x + frame.size.width - 16.0 - width - index as f32 * (width + 8.0),
+            frame.origin.y + 45.0,
+            width,
+            28.0,
+        )
+    }
+
+    fn advance_operation(&self) {
+        let mut state = self.state.borrow_mut();
+        let Some(operation) = state.operation.as_mut() else {
+            return;
+        };
+        operation.tick();
+        let result = operation.take_result();
+        if let Some(result) = result {
+            let kind = operation.kind;
+            let source = operation.source.clone();
+            state.operation = None;
+            state.browser.reload();
+            state.folder_tree = FolderTree::new(state.browser.root_directory().to_path_buf());
+            refresh_document_icons(&mut state);
+            match result {
+                Ok(Outcome::Completed(destination)) => {
+                    if kind == Kind::Move {
+                        file_clipboard::clear_move(&source);
+                    }
+                    if let Some(path) = destination {
+                        if path.parent() == Some(state.browser.current_dir()) {
+                            state.browser.select(path);
+                        }
+                    }
+                }
+                Err(error) => state.browser.report_error(error),
+                _ => {}
+            }
+        }
+    }
+
     fn show_context_menu(
         state: &mut FilesState,
         position: Point,
@@ -613,6 +742,7 @@ impl View for FilesView {
     }
 
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
+        self.advance_operation();
         let layout = Layout::new(bounds);
         let state = self.state.borrow();
 
@@ -622,6 +752,53 @@ impl View for FilesView {
         paint_toolbar(&layout, &state, context);
         paint_sidebar(&layout, &state, context);
         paint_content(&layout, &state, context);
+        if let Some(operation) = &state.operation {
+            let frame = Self::operation_frame(bounds);
+            Rectangle::new()
+                .color(RectangleColor::Custom(context.theme.colors.surface_subtle))
+                .paint(frame, context);
+            let message = if let Some(target) = operation.conflict() {
+                format!(
+                    "“{}” already exists",
+                    target.file_name().unwrap_or_default().to_string_lossy()
+                )
+            } else {
+                let label = operation.label();
+                let name = operation
+                    .source
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                if operation.kind == Kind::Delete {
+                    format!("{label} “{name}” — {} items (permanent)", operation.items)
+                } else {
+                    format!(
+                        "{label} “{name}” — {} items · {}",
+                        operation.items,
+                        crate::browser::format_size(operation.bytes)
+                    )
+                }
+            };
+            Text::label(message).paint(
+                Rect::new(
+                    frame.origin.x + 16.0,
+                    frame.origin.y + 12.0,
+                    (frame.size.width - 32.0).max(0.0),
+                    22.0,
+                ),
+                context,
+            );
+            for (index, button) in self.operation_buttons.iter().enumerate() {
+                if (index == 0 && operation.cancellable())
+                    || (index > 0 && operation.conflict().is_some())
+                {
+                    button.paint(Self::operation_button(frame, index), context);
+                }
+            }
+            if operation.conflict().is_none() {
+                context.request_redraw_at(Instant::now() + Duration::from_millis(16));
+            }
+        }
     }
 
     fn handle_event(
@@ -631,6 +808,51 @@ impl View for FilesView {
         context: &mut EventContext<'_>,
     ) -> EventResult {
         let layout = Layout::new(bounds);
+        if self.state.borrow().operation.is_some() {
+            let frame = Self::operation_frame(bounds);
+            let (cancellable, conflict) = {
+                let state = self.state.borrow();
+                let operation = state.operation.as_ref().unwrap();
+                (operation.cancellable(), operation.conflict().is_some())
+            };
+            for (index, button) in self.operation_buttons.iter().enumerate() {
+                if (index == 0 && cancellable) || (index > 0 && conflict) {
+                    button.handle_event(Self::operation_button(frame, index), event, context);
+                }
+            }
+            if matches!(
+                event,
+                ViewEvent::KeyPressed {
+                    key: Key::Escape,
+                    ..
+                }
+            ) && cancellable
+            {
+                self.operation_action.set(Some(OperationAction::Cancel));
+            }
+            if let Some(action) = self.operation_action.take() {
+                let mut state = self.state.borrow_mut();
+                if let Some(operation) = state.operation.as_mut() {
+                    let result = match action {
+                        OperationAction::Cancel => {
+                            operation.cancel();
+                            Ok(())
+                        }
+                        OperationAction::Replace => operation.resolve(Collision::Replace),
+                        OperationAction::KeepBoth => operation.resolve(Collision::KeepBoth),
+                        OperationAction::Skip => operation.resolve(Collision::Skip),
+                    };
+                    if let Err(error) = result {
+                        state.browser.report_error(error.to_string());
+                    }
+                }
+                context.request_redraw_in(bounds);
+                return EventResult::Consumed;
+            }
+            if event.position().is_some_and(|p| frame.contains(p)) {
+                return EventResult::Consumed;
+            }
+        }
         match event {
             ViewEvent::PointerMoved { position } => {
                 let mut state = self.state.borrow_mut();
@@ -773,7 +995,8 @@ impl View for FilesView {
                 };
                 state.open_with_path = None;
                 state.open_with_handlers.clear();
-                let items = if let Some(path) = sidebar_path {
+                let is_sidebar = sidebar_path.is_some();
+                let mut items = if let Some(_path) = sidebar_path {
                     vec![ContextMenuItem {
                         command_id: CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR,
                         label: String::from("Remove from Sidebar"),
@@ -912,6 +1135,40 @@ impl View for FilesView {
                         },
                     ]
                 };
+                if !is_sidebar {
+                    let idle = state.operation.is_none();
+                    let selected = state.browser.selected().is_some();
+                    for (id, label, enabled) in [
+                        (CONTEXT_COMMAND_COPY, "Copy", selected),
+                        (CONTEXT_COMMAND_CUT, "Cut", selected && idle),
+                        (
+                            CONTEXT_COMMAND_PASTE,
+                            "Paste",
+                            idle && file_clipboard::get().is_some(),
+                        ),
+                    ] {
+                        items.push(ContextMenuItem {
+                            command_id: id,
+                            label: label.into(),
+                            enabled,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        });
+                    }
+                    if !idle {
+                        for item in &mut items {
+                            if matches!(
+                                item.command_id,
+                                CONTEXT_COMMAND_NEW_FOLDER
+                                    | CONTEXT_COMMAND_RENAME
+                                    | CONTEXT_COMMAND_DELETE
+                            ) {
+                                item.enabled = false;
+                            }
+                        }
+                    }
+                }
                 Self::show_context_menu(&mut state, *position, items, context);
                 context.request_redraw_in(layout.content);
                 EventResult::Consumed
@@ -930,6 +1187,9 @@ impl View for FilesView {
                     Some(CONTEXT_COMMAND_ADD_TO_SIDEBAR | CONTEXT_COMMAND_REMOVE_FROM_SIDEBAR)
                 );
                 let changed = match command_id {
+                    Some(CONTEXT_COMMAND_COPY) => Self::clipboard_selection(&mut state, Kind::Copy),
+                    Some(CONTEXT_COMMAND_CUT) => Self::clipboard_selection(&mut state, Kind::Move),
+                    Some(CONTEXT_COMMAND_PASTE) => Self::paste(&mut state),
                     Some(CONTEXT_COMMAND_OPEN) => Self::open_selected(&mut state),
                     Some(CONTEXT_COMMAND_OPEN_WITH) => {
                         let items = state
@@ -1007,7 +1267,7 @@ impl View for FilesView {
                             let items = vec![
                                 ContextMenuItem {
                                     command_id: CONTEXT_COMMAND_CONFIRM_DELETE,
-                                    label: format!("Delete \"{name}\""),
+                                    label: format!("Permanently Delete \"{name}\""),
                                     enabled: true,
                                     checked: false,
                                     destructive: true,
@@ -1029,8 +1289,7 @@ impl View for FilesView {
                     }
                     Some(CONTEXT_COMMAND_CONFIRM_DELETE) => {
                         if let Some(path) = state.pending_delete.take() {
-                            state.browser.select(path);
-                            state.browser.delete_selected()
+                            Self::start_operation(&mut state, Kind::Delete, path)
                         } else {
                             false
                         }
@@ -1182,8 +1441,28 @@ impl View for FilesView {
                 context.request_redraw_in(bounds);
                 EventResult::Consumed
             }
-            ViewEvent::KeyPressed { key, .. } => {
+            ViewEvent::KeyPressed { key, modifiers } => {
                 let mut state = self.state.borrow_mut();
+                if modifiers.shortcut()
+                    && !state.path_focused
+                    && !state.search_focused
+                    && state.name_edit.is_none()
+                {
+                    let handled = match key {
+                        Key::Character('c' | 'C') => {
+                            Self::clipboard_selection(&mut state, Kind::Copy)
+                        }
+                        Key::Character('x' | 'X') if state.operation.is_none() => {
+                            Self::clipboard_selection(&mut state, Kind::Move)
+                        }
+                        Key::Character('v' | 'V') => Self::paste(&mut state),
+                        _ => false,
+                    };
+                    if handled {
+                        context.request_redraw_in(bounds);
+                        return EventResult::Consumed;
+                    }
+                }
                 let changed = match key {
                     Key::Escape if state.name_edit.is_some() => {
                         state.name_edit = None;
@@ -2285,6 +2564,115 @@ fn grid_column_count(content: Rect) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_copy_and_paste_runs_job_and_selects_completed_file() {
+        let root = std::env::temp_dir().join(format!("files-ui-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        std::fs::write(root.join("note.txt"), b"clipboard copy").unwrap();
+        let view = FilesView::new_with_activation(root.clone(), None, None);
+        view.state
+            .borrow_mut()
+            .browser
+            .select(root.join("note.txt"));
+        let bounds = Rect::new(0.0, 0.0, 920.0, 640.0);
+        let theme = Theme::current();
+        let mut measurer = viewkit::typography::TextMeasurer::new();
+        let mut context = EventContext::new(&theme, &theme.typography, &mut measurer);
+        let shortcut = |key| ViewEvent::KeyPressed {
+            key: Key::Character(key),
+            modifiers: viewkit::platform::KeyModifiers::from_bits(
+                viewkit::platform::KeyModifiers::CONTROL,
+            ),
+        };
+        assert!(
+            view.handle_event(bounds, &shortcut('c'), &mut context)
+                .is_consumed()
+        );
+        view.state
+            .borrow_mut()
+            .browser
+            .navigate(root.join("destination"));
+        assert!(
+            view.handle_event(bounds, &shortcut('v'), &mut context)
+                .is_consumed()
+        );
+        assert!(view.state.borrow().operation.is_some());
+        for _ in 0..100 {
+            view.advance_operation();
+            if view.state.borrow().operation.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            std::fs::read(root.join("destination/note.txt")).unwrap(),
+            b"clipboard copy"
+        );
+        assert_eq!(
+            view.state.borrow().browser.selected(),
+            Some(root.join("destination/note.txt").as_path())
+        );
+        assert!(root.join("note.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflict_keep_both_button_resumes_a_paused_job() {
+        let root = std::env::temp_dir().join(format!("files-ui-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        std::fs::write(root.join("note.txt"), b"new").unwrap();
+        std::fs::write(root.join("destination/note.txt"), b"old").unwrap();
+        let view = FilesView::new_with_activation(root.join("destination"), None, None);
+        FilesView::start_operation(
+            &mut view.state.borrow_mut(),
+            Kind::Copy,
+            root.join("note.txt"),
+        );
+        let bounds = Rect::new(0.0, 0.0, 920.0, 640.0);
+        let theme = Theme::current();
+        let mut measurer = viewkit::typography::TextMeasurer::new();
+        let mut list = viewkit::draw_command::DisplayList::new();
+        view.paint(
+            bounds,
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut measurer),
+        );
+        let frame = FilesView::operation_button(FilesView::operation_frame(bounds), 2);
+        let position = Point::new(frame.origin.x + 20.0, frame.origin.y + 12.0);
+        let mut context = EventContext::new(&theme, &theme.typography, &mut measurer);
+        view.handle_event(
+            bounds,
+            &ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Primary,
+            },
+            &mut context,
+        );
+        view.handle_event(
+            bounds,
+            &ViewEvent::PointerReleased {
+                position,
+                button: PointerButton::Primary,
+            },
+            &mut context,
+        );
+        for _ in 0..100 {
+            view.advance_operation();
+            if view.state.borrow().operation.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            std::fs::read(root.join("destination/note.txt")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(root.join("destination/note 2.txt")).unwrap(),
+            b"new"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn default_sidebar_uses_standard_home_directories_in_order() {

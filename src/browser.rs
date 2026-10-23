@@ -322,26 +322,6 @@ impl Browser {
         }
     }
 
-    pub(crate) fn delete_selected(&mut self) -> bool {
-        let Some(path) = self.selected.clone() else {
-            return false;
-        };
-        if path.parent() != Some(self.current_dir.as_path()) {
-            self.report_error("The selected item cannot be deleted");
-            return false;
-        }
-        match remove_path_tree(&path) {
-            Ok(()) => {
-                self.reload_select(None);
-                true
-            }
-            Err(error) => {
-                self.set_operation_error("delete", &path, error);
-                false
-            }
-        }
-    }
-
     fn reload_select(&mut self, selected: Option<PathBuf>) {
         match read_entries(&self.current_dir) {
             Ok(entries) => {
@@ -389,17 +369,6 @@ impl Browser {
 
 fn valid_entry_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
-}
-
-fn remove_path_tree(path: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return fs::remove_file(path);
-    }
-    for entry in fs::read_dir(path)? {
-        remove_path_tree(&entry?.path())?;
-    }
-    fs::remove_dir(path)
 }
 
 fn read_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
@@ -503,7 +472,7 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
     if bytes < 1_000 {
         return format!("{bytes} bytes");
@@ -658,19 +627,6 @@ mod tests {
         assert!(browser.rename_selected("new.txt"));
         assert!(!old.exists());
         assert!(directory.path().join("new.txt").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn deletes_a_directory_tree() -> std::io::Result<()> {
-        let directory = TestDirectory::new()?;
-        let target = directory.path().join("target");
-        fs::create_dir(&target)?;
-        fs::write(target.join("child.txt"), b"child")?;
-        let mut browser = Browser::new(directory.path());
-        browser.select(target.clone());
-        assert!(browser.delete_selected());
-        assert!(!target.exists());
         Ok(())
     }
 

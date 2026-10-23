@@ -1,7 +1,9 @@
 mod browser;
 mod file_association;
+mod file_clipboard;
 mod files_view;
 mod folder_tree;
+mod operations;
 mod sidebar;
 
 use std::path::{Path, PathBuf};
