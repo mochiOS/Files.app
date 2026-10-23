@@ -64,6 +64,21 @@ pub(crate) fn open(path: &Path, bundle_id: Option<&str>) -> Result<(), String> {
 
 #[cfg(not(target_os = "mochios"))]
 pub(crate) fn open(_path: &Path, _bundle_id: Option<&str>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = _path
+            .to_str()
+            .ok_or("The document path is not valid UTF-8")?;
+        let result = if let Some(bundle_id) = _bundle_id {
+            document::open_with(path, content_type(_path), bundle_id, AssociationRoles::VIEW)
+        } else {
+            document::open(path, content_type(_path), AssociationRoles::VIEW)
+        };
+        return result
+            .map(|_| ())
+            .map_err(|error| format!("The document could not be opened ({error})"));
+    }
+    #[cfg(not(target_os = "linux"))]
     Err(String::from(
         "Application launching is only available on mochiOS",
     ))
