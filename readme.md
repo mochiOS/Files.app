@@ -37,3 +37,10 @@ moves report an error); copying symbolic links / special files reports an error
 and removes the partial copy. Deleting symbolic links never traverses their
 targets. Interrupted processes can leave hidden `.files-transfer-*` recovery
 folders; there is no crash recovery service yet.
+
+## Save As
+
+An existing regular file requires an explicit Replace confirmation using ViewKit's
+standard omochi Dialog and buttons. Cancel or Escape returns to the same picker
+without changing the file. Invalid names, disallowed types, folders, special files
+and symbolic links are rejected before the path is sent to the document writer.

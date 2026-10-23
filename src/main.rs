@@ -6,6 +6,7 @@ mod folder_tree;
 mod operations;
 mod sidebar;
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -62,11 +63,13 @@ struct SystemPanelBody {
     name_field: Option<Rc<TextField>>,
     cancel: Rc<Button>,
     accept: Rc<Button>,
+    overwrite: Rc<RefCell<Option<Rc<dyn View>>>>,
 }
 
 impl SystemPanelBody {
     fn new(configuration: SystemPanelConfiguration) -> Self {
         let initial_directory = panel_initial_directory(&configuration);
+        let overwrite = Rc::new(RefCell::new(None));
         let cancel_configuration = configuration.clone();
         let cancel = Button::new("Cancel")
             .size(ButtonSize::Small)
@@ -97,6 +100,7 @@ impl SystemPanelBody {
                 name_field: None,
                 cancel: Rc::new(cancel),
                 accept: Rc::new(accept),
+                overwrite,
             }
         } else {
             let name = TextFieldInteractionState::new();
@@ -118,26 +122,39 @@ impl SystemPanelBody {
             let submit_configuration = configuration.clone();
             let submit_files = files.clone();
             let submit_name = name.clone();
+            let submit_overwrite = overwrite.clone();
             let name_field = TextField::with_interaction(name.clone())
                 .size(TextFieldSize::Small)
                 .placeholder("File name")
                 .on_submit(move || {
-                    complete_save_selection(&submit_configuration, &submit_files, &submit_name);
+                    complete_save_selection(
+                        &submit_configuration,
+                        &submit_files,
+                        &submit_name,
+                        &submit_overwrite,
+                    );
                 });
             let accept_configuration = configuration.clone();
             let accept_files = files.clone();
             let accept_name = name;
+            let accept_overwrite = overwrite.clone();
             let accept = Button::new("Save")
                 .size(ButtonSize::Small)
                 .style(ButtonStyle::Accent)
                 .on_click(move || {
-                    complete_save_selection(&accept_configuration, &accept_files, &accept_name);
+                    complete_save_selection(
+                        &accept_configuration,
+                        &accept_files,
+                        &accept_name,
+                        &accept_overwrite,
+                    );
                 });
             Self {
                 files,
                 name_field: Some(Rc::new(name_field)),
                 cancel: Rc::new(cancel),
                 accept: Rc::new(accept),
+                overwrite,
             }
         }
     }
@@ -187,26 +204,152 @@ fn panel_initial_directory(configuration: &SystemPanelConfiguration) -> PathBuf 
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SaveDestination {
+    New(PathBuf),
+    Existing(PathBuf),
+}
+
+fn save_destination(
+    directory: &Path,
+    value: &str,
+    allowed: &[ContentType],
+) -> Result<SaveDestination, String> {
+    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\0']) {
+        return Err("Enter a valid file name".into());
+    }
+    let destination = directory.join(value);
+    if !path_matches_content_types(&destination, allowed) {
+        return Err("This file type is not allowed".into());
+    }
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("Choose a regular file rather than a symbolic link".into())
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            Err("A folder or special file already uses this name".into())
+        }
+        Ok(_) => Ok(SaveDestination::Existing(destination)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(SaveDestination::New(destination))
+        }
+        Err(error) => Err(format!("Cannot inspect the destination: {error}")),
+    }
+}
+
 fn complete_save_selection(
     configuration: &SystemPanelConfiguration,
     files: &FilesView,
     name: &TextFieldInteractionState,
+    overwrite: &Rc<RefCell<Option<Rc<dyn View>>>>,
 ) {
-    let value = name.value();
-    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\0']) {
-        files.report_error("Enter a valid file name");
-        name.set_focused(true);
+    if overwrite.borrow().is_some() {
         return;
     }
-    let destination = files.current_directory().join(value);
-    if !path_matches_content_types(&destination, &configuration.allowed_content_types) {
-        files.report_error("This file type is not allowed");
-        name.set_focused(true);
-        return;
+    match save_destination(
+        &files.current_directory(),
+        &name.value(),
+        &configuration.allowed_content_types,
+    ) {
+        Err(error) => {
+            files.report_error(error);
+            name.set_focused(true);
+        }
+        Ok(SaveDestination::New(destination)) => {
+            if let Err(error) = complete_system_panel(configuration, 0, &destination) {
+                files.report_error(error);
+            }
+        }
+        Ok(SaveDestination::Existing(destination)) => {
+            // Reuse ViewKit's omochi dialog, typography, spacing and buttons.
+            // Weak references avoid a prompt -> callback -> prompt ownership cycle.
+            let cancel = Rc::downgrade(overwrite);
+            let dismiss = cancel.clone();
+            let replace = cancel.clone();
+            let configuration = configuration.clone();
+            let files = files.clone();
+            let title = format!(
+                "Replace “{}”?",
+                destination
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+            let cancel_button =
+                Button::new("Cancel")
+                    .style(ButtonStyle::Standard)
+                    .on_click(move || {
+                        if let Some(prompt) = cancel.upgrade() {
+                            prompt.borrow_mut().take();
+                        }
+                    });
+            let replace_button =
+                Button::new("Replace")
+                    .style(ButtonStyle::Primary)
+                    .on_click(move || {
+                        if let Some(prompt) = replace.upgrade() {
+                            prompt.borrow_mut().take();
+                        }
+                        // Recheck type after confirmation before passing the path to the writer.
+                        let file_name = destination
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default();
+                        match save_destination(
+                            destination.parent().unwrap(),
+                            file_name,
+                            &configuration.allowed_content_types,
+                        ) {
+                            Ok(_) => {
+                                if let Err(error) =
+                                    complete_system_panel(&configuration, 0, &destination)
+                                {
+                                    files.report_error(error);
+                                }
+                            }
+                            Err(error) => files.report_error(error),
+                        }
+                    });
+            let content = VStack::new()
+                .gap(StackGap::Medium)
+                .alignment(StackAlignment::Stretch)
+                .child(Text::styled(title.clone(), TextRole::TitleSmall))
+                .child(Text::body("A file with this name already exists. Replacing it will overwrite its contents."))
+                .child(Spacer::new())
+                .child(HStack::new()
+                    .gap(StackGap::Small)
+                    .distribution(StackDistribution::End)
+                    .child(cancel_button)
+                    .child(replace_button));
+            let dialog = Dialog::new()
+                .accessibility_label(title)
+                .on_dismiss(move || {
+                    if let Some(prompt) = dismiss.upgrade() {
+                        prompt.borrow_mut().take();
+                    }
+                })
+                .content(content);
+            *overwrite.borrow_mut() = Some(Rc::new(dialog));
+        }
     }
-    if let Err(error) = complete_system_panel(configuration, 0, &destination) {
-        files.report_error(error);
-    }
+}
+
+fn overwrite_bounds(bounds: Rect, theme: &Theme) -> Rect {
+    let width = theme
+        .layout
+        .dialog_width
+        .min((bounds.size.width - 32.0).max(0.0));
+    let height = theme
+        .layout
+        .dialog_height
+        .max(220.0)
+        .min((bounds.size.height - 32.0).max(0.0));
+    Rect::new(
+        bounds.origin.x + (bounds.size.width - width) / 2.0,
+        bounds.origin.y + (bounds.size.height - height) / 2.0,
+        width,
+        height,
+    )
 }
 
 fn path_matches_content_types(path: &Path, allowed: &[ContentType]) -> bool {
@@ -242,6 +385,9 @@ impl View for SystemPanelBody {
         }
         self.cancel.paint(cancel, context);
         self.accept.paint(accept, context);
+        if let Some(prompt) = self.overwrite.borrow().as_ref() {
+            prompt.paint(overwrite_bounds(bounds, context.theme), context);
+        }
     }
 
     fn handle_event(
@@ -250,6 +396,12 @@ impl View for SystemPanelBody {
         event: &ViewEvent,
         context: &mut EventContext<'_>,
     ) -> EventResult {
+        let prompt = self.overwrite.borrow().clone();
+        if let Some(prompt) = prompt {
+            prompt.handle_event(overwrite_bounds(bounds, context.theme()), event, context);
+            context.request_redraw_in(bounds);
+            return EventResult::Consumed;
+        }
         let (content, cancel, accept, name) = Self::layout(bounds);
         let mut result = self
             .cancel
@@ -460,4 +612,132 @@ fn main() -> Result<(), ViewKitError> {
         return run::<SystemPanelApp>();
     }
     run::<FilesApp>()
+}
+
+#[cfg(test)]
+mod save_panel_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use viewkit::platform::PointerButton;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Directory(PathBuf);
+    impl Directory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "files-save-panel-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn save_selection_distinguishes_new_existing_and_invalid_targets() {
+        let directory = Directory::new();
+        fs::write(directory.0.join("existing.txt"), b"original").unwrap();
+        fs::create_dir(directory.0.join("folder")).unwrap();
+        assert_eq!(
+            save_destination(&directory.0, "new.txt", &[]).unwrap(),
+            SaveDestination::New(directory.0.join("new.txt"))
+        );
+        assert_eq!(
+            save_destination(&directory.0, "existing.txt", &[]).unwrap(),
+            SaveDestination::Existing(directory.0.join("existing.txt"))
+        );
+        for name in ["", ".", "..", "../outside", "nul\0name", "folder"] {
+            assert!(
+                save_destination(&directory.0, name, &[]).is_err(),
+                "{name:?}"
+            );
+        }
+        let png = ContentType::parse("image/png").unwrap();
+        assert!(save_destination(&directory.0, "existing.txt", &[png]).is_err());
+        assert_eq!(
+            fs::read(directory.0.join("existing.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!directory.0.join("new.txt").exists());
+    }
+
+    #[test]
+    fn saving_existing_file_requires_confirmation_and_escape_returns_to_picker() {
+        let directory = Directory::new();
+        fs::write(directory.0.join("existing.txt"), b"original").unwrap();
+        let panel = SystemPanelBody::new(SystemPanelConfiguration {
+            workspace_endpoint: 0,
+            token: [0; workspace_protocol::FILE_PANEL_TOKEN_LEN],
+            mode: workspace_protocol::FILE_PANEL_MODE_SAVE,
+            title: "Save As".into(),
+            initial_directory: directory.0.to_string_lossy().into_owned(),
+            suggested_name: "existing.txt".into(),
+            allowed_content_types: vec![],
+        });
+        let bounds = Rect::new(0.0, 0.0, 920.0, 640.0);
+        let theme = Theme::current();
+        let mut measurer = viewkit::typography::TextMeasurer::new();
+        let mut list = viewkit::draw_command::DisplayList::new();
+        panel.paint(
+            bounds,
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut measurer),
+        );
+        let (_, _, accept, _) = SystemPanelBody::layout(bounds);
+        let position = Point::new(accept.origin.x + 20.0, accept.origin.y + 10.0);
+        let mut context = EventContext::new(&theme, &theme.typography, &mut measurer);
+        panel.handle_event(
+            bounds,
+            &ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Primary,
+            },
+            &mut context,
+        );
+        panel.handle_event(
+            bounds,
+            &ViewEvent::PointerReleased {
+                position,
+                button: PointerButton::Primary,
+            },
+            &mut context,
+        );
+        assert!(panel.overwrite.borrow().is_some());
+        assert_eq!(
+            fs::read(directory.0.join("existing.txt")).unwrap(),
+            b"original"
+        );
+        panel.handle_event(
+            bounds,
+            &ViewEvent::KeyPressed {
+                key: Key::Escape,
+                modifiers: KeyModifiers::default(),
+            },
+            &mut context,
+        );
+        assert!(panel.overwrite.borrow().is_none());
+        assert_eq!(panel.files.current_directory(), directory.0);
+        assert_eq!(
+            fs::read(directory.0.join("existing.txt")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_symlinks_even_when_the_target_is_missing() {
+        let directory = Directory::new();
+        std::os::unix::fs::symlink(
+            directory.0.join("missing.txt"),
+            directory.0.join("link.txt"),
+        )
+        .unwrap();
+        assert!(save_destination(&directory.0, "link.txt", &[]).is_err());
+        assert!(!directory.0.join("missing.txt").exists());
+    }
 }
