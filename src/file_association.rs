@@ -18,6 +18,9 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         .to_ascii_lowercase()
         .as_str()
     {
+        "ttf" => appcore::content_type::TRUE_TYPE_FONT,
+        "otf" => appcore::content_type::OPEN_TYPE_FONT,
+        "ttc" | "otc" => appcore::content_type::FONT_COLLECTION,
         "json" => "application/json",
         "toml" => "application/toml",
         "xml" => "application/xml",
@@ -140,5 +143,17 @@ mod tests {
         assert_eq!(content_type(Path::new("document.toml")), "application/toml");
         assert_eq!(content_type(Path::new("README.md")), "text/markdown");
         assert_eq!(content_type(Path::new("main.rs")), "text/x-rust");
+        for (name, mime) in [
+            ("font.TTF", "font/ttf"),
+            ("font.otf", "font/otf"),
+            ("font.ttc", "font/collection"),
+            ("font.otc", "font/collection"),
+        ] {
+            assert_eq!(content_type(Path::new(name)), mime);
+            assert_eq!(
+                content_type(Path::new(name)),
+                appcore::content_type::ContentType::for_path(name).identifier()
+            );
+        }
     }
 }
