@@ -373,9 +373,7 @@ impl View for SystemPanelBody {
             bounds.size.width,
             bounds.size.height - content.size.height,
         );
-        Rectangle::new()
-            .color(RectangleColor::Custom(context.theme.colors.surface_subtle))
-            .paint(footer, context);
+        Surface::pane().paint(footer, context);
         if let (Some(field), Some(name)) = (self.name_field.as_ref(), name) {
             Text::label("Save As:").paint(
                 Rect::new(name.origin.x - 76.0, name.origin.y + 5.0, 68.0, 20.0),
