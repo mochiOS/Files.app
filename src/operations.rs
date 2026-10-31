@@ -31,6 +31,7 @@ enum Work {
     Delete(PathBuf),
     DeleteDirectory(ReadDir, PathBuf),
     RemoveDirectory(PathBuf),
+    SyncDirectory(PathBuf),
 }
 #[derive(Clone, Copy)]
 enum Phase {
@@ -56,6 +57,7 @@ pub(crate) struct Operation {
     result: Option<Result<Outcome, String>>,
     failure: Option<String>,
     skipped: bool,
+    copied_move: bool,
 }
 
 fn exists(path: &Path) -> io::Result<bool> {
@@ -84,6 +86,7 @@ impl Operation {
             result: None,
             failure: None,
             skipped: false,
+            copied_move: false,
         };
         if kind == Kind::Delete {
             operation.work.push(Work::Delete(source));
@@ -192,10 +195,18 @@ impl Operation {
                 // Keep source and previous destination on errors. Remove staging cooperatively.
                 let detail = format!("{}: {error}", self.source.display());
                 self.work.clear();
-                if self.failure.is_some() || self.backup.is_some() {
+                if self.failure.is_some()
+                    || self.backup.is_some()
+                    || (self.copied_move
+                        && matches!(self.phase, Phase::Committing | Phase::Cleaning))
+                {
                     self.result = Some(Err(format!(
-                        "{detail}. Recovery data: {}",
-                        self.stage.as_deref().unwrap_or(&self.source).display()
+                        "{detail}. Recovery data: {}. Destination: {}. Completed deletions cannot be undone",
+                        self.stage.as_deref().unwrap_or(&self.source).display(),
+                        self.destination
+                            .as_deref()
+                            .unwrap_or(&self.source)
+                            .display()
                     )));
                 } else {
                     self.failure = Some(detail);
@@ -246,6 +257,8 @@ impl Operation {
                         let child = target.join(entry.file_name());
                         self.work.push(Work::Directory(entries, target));
                         self.work.push(Work::Copy(entry.path(), child));
+                    } else if self.copied_move {
+                        self.work.push(Work::SyncDirectory(target));
                     }
                 }
                 Work::Bytes(mut input, mut output) => {
@@ -254,6 +267,9 @@ impl Operation {
                     if count == 0 {
                         output.flush()?;
                         output.set_permissions(input.metadata()?.permissions())?;
+                        if self.copied_move {
+                            output.sync_all()?;
+                        }
                         self.items += 1;
                     } else {
                         output.write_all(&buffer[..count])?;
@@ -280,6 +296,7 @@ impl Operation {
                         self.work.push(Work::RemoveDirectory(path));
                     }
                 }
+                Work::SyncDirectory(path) => File::open(path)?.sync_all()?,
                 Work::RemoveDirectory(path) => {
                     fs::remove_dir(path)?;
                     self.items += 1;
@@ -316,6 +333,9 @@ impl Operation {
             Phase::Committing => {
                 let target = self.destination.as_ref().unwrap();
                 let stage = self.stage.as_ref().unwrap();
+                if self.copied_move {
+                    File::open(stage)?.sync_all()?;
+                }
                 if exists(target)? {
                     if !self.replace {
                         self.conflict = true;
@@ -325,8 +345,11 @@ impl Operation {
                     let backup = stage.join("previous");
                     fs::rename(target, &backup)?;
                     self.backup = Some(backup);
+                    if self.copied_move {
+                        File::open(stage)?.sync_all()?;
+                    }
                 }
-                let source = if self.kind == Kind::Move {
+                let source = if self.kind == Kind::Move && !self.copied_move {
                     self.source.clone()
                 } else {
                     stage.join("item")
@@ -336,7 +359,23 @@ impl Operation {
                         fs::rename(backup, target)?;
                         self.backup = None;
                     }
+                    if self.kind == Kind::Move
+                        && !self.copied_move
+                        && error.kind() == io::ErrorKind::CrossesDevices
+                    {
+                        self.copied_move = true;
+                        self.phase = Phase::Copying;
+                        self.work
+                            .push(Work::Copy(self.source.clone(), stage.join("item")));
+                        return Ok(());
+                    }
                     return Err(error);
+                }
+                if self.copied_move {
+                    // Never remove the source until all copied bytes and the
+                    // published directory entry have been synced successfully.
+                    File::open(target.parent().unwrap())?.sync_all()?;
+                    self.work.push(Work::Delete(self.source.clone()));
                 }
                 if let Some(backup) = self.backup.take() {
                     self.work.push(Work::Delete(backup));
@@ -560,5 +599,69 @@ mod tests {
         let mut job = Operation::new(Kind::Delete, source, &s.0).unwrap();
         finish(&mut job).unwrap();
         assert_eq!(fs::read(external.join("keep")).unwrap(), b"safe");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cross_device_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn cross_device_move_syncs_and_publishes_before_removing_source() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let source = Cleanup(
+            std::env::temp_dir().join(format!("files-cross-source-{}-{nonce}", std::process::id())),
+        );
+        let target = Cleanup(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!(".cross-device-test-{}-{nonce}", std::process::id())),
+        );
+        fs::create_dir(&source.0).unwrap();
+        fs::create_dir(&target.0).unwrap();
+        if fs::metadata(&source.0).unwrap().dev() == fs::metadata(&target.0).unwrap().dev() {
+            return;
+        }
+        let directory = source.0.join("folder");
+        fs::create_dir(&directory).unwrap();
+        let bytes = vec![42; 512 * 1024];
+        fs::write(directory.join("data.bin"), &bytes).unwrap();
+        let mut operation = Operation::new(Kind::Move, directory.clone(), &target.0).unwrap();
+        let mut used_copy = false;
+        let mut result = None;
+        for _ in 0..10_000 {
+            operation.tick();
+            used_copy |= operation.copied_move;
+            if operation.copied_move && matches!(operation.phase, Phase::Copying) {
+                assert!(directory.join("data.bin").exists());
+            }
+            if let Some(value) = operation.take_result() {
+                result = Some(value.unwrap());
+                break;
+            }
+        }
+        let result = result.expect("cross-device move should finish");
+        assert!(used_copy);
+        assert_eq!(
+            result,
+            Outcome::Completed(Some(fs::canonicalize(&target.0).unwrap().join("folder")))
+        );
+        assert!(!directory.exists());
+        assert_eq!(fs::read(target.0.join("folder/data.bin")).unwrap(), bytes);
+        assert!(!fs::read_dir(&target.0).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".files-transfer-")
+        }));
     }
 }
