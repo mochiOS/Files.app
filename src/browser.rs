@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -69,6 +70,8 @@ pub(crate) struct Browser {
     history_index: usize,
     search: String,
     selected: Option<PathBuf>,
+    selection: BTreeSet<PathBuf>,
+    anchor: Option<PathBuf>,
     view_mode: ViewMode,
     alert: Alert,
 }
@@ -93,6 +96,8 @@ impl Browser {
             history_index: 0,
             search: String::new(),
             selected: None,
+            selection: BTreeSet::new(),
+            anchor: None,
             view_mode: ViewMode::Grid,
             alert: Alert::new(),
         };
@@ -121,15 +126,124 @@ impl Browser {
     }
 
     pub(crate) fn selected(&self) -> Option<&Path> {
-        self.selected.as_deref()
+        self.selected
+            .as_deref()
+            .filter(|path| self.selection.contains(*path))
+            .or_else(|| self.selection.first().map(PathBuf::as_path))
     }
 
     pub(crate) fn select(&mut self, path: PathBuf) {
+        self.selection.clear();
+        self.selection.insert(path.clone());
+        self.anchor = Some(path.clone());
         self.selected = Some(path);
+    }
+
+    pub(crate) fn is_selected(&self, path: &Path) -> bool {
+        self.selection.contains(path)
+    }
+    pub(crate) fn selection_count(&self) -> usize {
+        self.selection.len()
+    }
+    pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| self.selection.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+    pub(crate) fn select_paths(&mut self, paths: Vec<PathBuf>) {
+        let visible: BTreeSet<_> = self
+            .entries()
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.selection = paths
+            .into_iter()
+            .filter(|path| visible.contains(path))
+            .collect();
+        self.selected = self
+            .entries()
+            .into_iter()
+            .find(|entry| self.selection.contains(&entry.path))
+            .map(|entry| entry.path.clone());
+        self.anchor = self.selected.clone();
+    }
+    pub(crate) fn select_all(&mut self) {
+        self.select_paths(
+            self.entries()
+                .into_iter()
+                .map(|entry| entry.path.clone())
+                .collect(),
+        );
+    }
+    pub(crate) fn select_modified(&mut self, path: PathBuf, toggle: bool, extend: bool) {
+        let paths: Vec<_> = self
+            .entries()
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        let Some(end) = paths.iter().position(|candidate| candidate == &path) else {
+            return;
+        };
+        if extend {
+            let start = self
+                .anchor
+                .as_ref()
+                .and_then(|anchor| paths.iter().position(|candidate| candidate == anchor))
+                .unwrap_or(end);
+            if self.anchor.is_none() {
+                self.anchor = Some(path.clone());
+            }
+            if !toggle {
+                self.selection.clear();
+            }
+            self.selection
+                .extend(paths[start.min(end)..=start.max(end)].iter().cloned());
+            self.selected = Some(path);
+        } else if toggle {
+            if !self.selection.remove(&path) {
+                self.selection.insert(path.clone());
+            }
+            self.anchor = Some(path.clone());
+            self.selected = Some(path);
+        } else {
+            self.select(path);
+        }
+    }
+    pub(crate) fn context_select(&mut self, path: PathBuf) {
+        if self.is_selected(&path) {
+            self.selected = Some(path);
+        } else {
+            self.select(path);
+        }
+    }
+    pub(crate) fn select_relative_modified(&mut self, offset: isize, extend: bool) {
+        let paths: Vec<_> = self
+            .entries()
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        if paths.is_empty() {
+            self.clear_selection();
+            return;
+        }
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|path| paths.iter().position(|candidate| candidate == path));
+        let next = match current {
+            Some(index) => (index as isize + offset).clamp(0, paths.len() as isize - 1) as usize,
+            None if offset < 0 => paths.len() - 1,
+            None => 0,
+        };
+        self.select_modified(paths[next].clone(), false, extend);
     }
 
     pub(crate) fn clear_selection(&mut self) {
         self.selected = None;
+        self.selection.clear();
+        self.anchor = None;
     }
 
     pub(crate) fn search(&self) -> &str {
@@ -139,16 +253,22 @@ impl Browser {
     pub(crate) fn push_search(&mut self, text: &str) {
         self.search.push_str(text);
         self.selected = None;
+        self.selection.clear();
+        self.anchor = None;
     }
 
     pub(crate) fn pop_search(&mut self) {
         self.search.pop();
         self.selected = None;
+        self.selection.clear();
+        self.anchor = None;
     }
 
     pub(crate) fn clear_search(&mut self) {
         self.search.clear();
         self.selected = None;
+        self.selection.clear();
+        self.anchor = None;
     }
 
     pub(crate) fn view_mode(&self) -> ViewMode {
@@ -224,10 +344,17 @@ impl Browser {
 
     pub(crate) fn reload(&mut self) {
         match read_entries(&self.current_dir) {
-            Ok(entries) => self.set_directory(self.current_dir.clone(), entries),
+            Ok(entries) => {
+                let selected = self.selected_paths();
+                self.entries = entries;
+                self.select_paths(selected);
+                self.clear_error();
+            }
             Err(error) => {
                 self.entries.clear();
                 self.selected = None;
+                self.selection.clear();
+                self.anchor = None;
                 self.report_error(format!(
                     "Cannot read {}: {error}",
                     self.current_dir.display()
@@ -237,26 +364,11 @@ impl Browser {
     }
 
     pub(crate) fn select_relative(&mut self, offset: isize) {
-        let entries = self.entries();
-        if entries.is_empty() {
-            self.selected = None;
-            return;
-        }
-
-        let current = self
-            .selected
-            .as_ref()
-            .and_then(|selected| entries.iter().position(|entry| &entry.path == selected));
-        let next = match current {
-            Some(index) => (index as isize + offset).clamp(0, entries.len() as isize - 1) as usize,
-            None if offset < 0 => entries.len() - 1,
-            None => 0,
-        };
-        self.selected = Some(entries[next].path.clone());
+        self.select_relative_modified(offset, false);
     }
 
     pub(crate) fn open_selected(&mut self) -> bool {
-        let Some(selected) = self.selected.clone() else {
+        let Some(selected) = self.selected().map(Path::to_path_buf) else {
             return false;
         };
         let is_directory = self
@@ -294,7 +406,7 @@ impl Browser {
     }
 
     pub(crate) fn rename_selected(&mut self, name: &str) -> bool {
-        let Some(source) = self.selected.clone() else {
+        let Some(source) = self.selected().map(Path::to_path_buf) else {
             return false;
         };
         if !valid_entry_name(name) || source.parent() != Some(self.current_dir.as_path()) {
@@ -327,12 +439,14 @@ impl Browser {
             Ok(entries) => {
                 self.entries = entries;
                 self.search.clear();
-                self.selected = selected;
+                self.select_paths(selected.into_iter().collect());
                 self.clear_error();
             }
             Err(error) => {
                 self.entries.clear();
                 self.selected = None;
+                self.selection.clear();
+                self.anchor = None;
                 self.report_error(format!(
                     "Cannot read {}: {error}",
                     self.current_dir.display()
@@ -363,6 +477,8 @@ impl Browser {
         self.entries = entries;
         self.search.clear();
         self.selected = None;
+        self.selection.clear();
+        self.anchor = None;
         self.clear_error();
     }
 }
@@ -545,6 +661,47 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn toggling_and_shift_ranges_share_a_stable_anchor() {
+        let root = TestDirectory::new().unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            fs::write(root.path().join(name), "text").unwrap();
+        }
+        let mut browser = Browser::new(root.path());
+        browser.select(root.path().join("b"));
+        browser.select_modified(root.path().join("e"), false, true);
+        assert_eq!(browser.selection_count(), 4);
+        browser.select_modified(root.path().join("c"), false, true);
+        assert_eq!(browser.selection_count(), 2);
+        browser.select_modified(root.path().join("a"), true, false);
+        assert_eq!(browser.selection_count(), 3);
+        browser.select_modified(root.path().join("a"), true, false);
+        assert_eq!(browser.selection_count(), 2);
+        browser.context_select(root.path().join("b"));
+        assert_eq!(browser.selection_count(), 2);
+        browser.select_all();
+        assert_eq!(browser.selection_count(), 5);
+        browser.push_search("b");
+        assert_eq!(browser.selection_count(), 0);
+        browser.select_all();
+        assert_eq!(browser.selected_paths(), vec![root.path().join("b")]);
+    }
+
+    #[test]
+    fn reload_keeps_the_filter_and_only_surviving_visible_selections() {
+        let root = TestDirectory::new().unwrap();
+        for name in ["a.txt", "b.txt", "c.rs"] {
+            fs::write(root.path().join(name), name).unwrap();
+        }
+        let mut browser = Browser::new(root.path());
+        browser.push_search(".txt");
+        browser.select_all();
+        fs::remove_file(root.path().join("a.txt")).unwrap();
+        browser.reload();
+        assert_eq!(browser.search(), ".txt");
+        assert_eq!(browser.selected_paths(), vec![root.path().join("b.txt")]);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod browser;
+mod batch;
 mod file_association;
 mod file_clipboard;
 mod files_view;

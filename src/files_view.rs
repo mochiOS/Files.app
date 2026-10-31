@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::batch::Batch as Operation;
 use crate::browser::{Browser, EntryKind, FileEntry, ViewMode};
 use crate::file_association::{self, Handler as AssociationHandler};
 use crate::file_clipboard;
 use crate::folder_tree::FolderTree;
-use crate::operations::{Collision, Kind, Operation, Outcome};
+use crate::operations::{Collision, Kind};
 use crate::sidebar::SidebarBookmarks;
 use viewkit::components::{Button, ButtonSize, ButtonStyle, Icon, IconName, Image, Svg, Text};
 use viewkit::draw_command::DrawCommand;
@@ -254,7 +255,10 @@ struct FilesState {
     context_anchor: Point,
     context_sidebar_path: Option<PathBuf>,
     name_edit: Option<NameEdit>,
-    pending_delete: Option<PathBuf>,
+    pending_delete: Option<Vec<PathBuf>>,
+    modifiers: viewkit::platform::KeyModifiers,
+    activation_modifiers: viewkit::platform::KeyModifiers,
+    operation_summary: Option<String>,
     operation: Option<Operation>,
     open_with_path: Option<PathBuf>,
     open_with_handlers: Vec<AssociationHandler>,
@@ -293,6 +297,8 @@ enum OperationAction {
     Replace,
     KeepBoth,
     Skip,
+    ReplaceAll,
+    SkipAll,
 }
 
 impl FilesView {
@@ -339,6 +345,8 @@ impl FilesView {
             ("Replace", OperationAction::Replace),
             ("Keep Both", OperationAction::KeepBoth),
             ("Skip", OperationAction::Skip),
+            ("Replace All", OperationAction::ReplaceAll),
+            ("Skip All", OperationAction::SkipAll),
         ]
         .into_iter()
         .map(|(label, action)| {
@@ -373,6 +381,9 @@ impl FilesView {
                 context_sidebar_path: None,
                 name_edit: None,
                 pending_delete: None,
+                modifiers: Default::default(),
+                activation_modifiers: Default::default(),
+                operation_summary: None,
                 operation: None,
                 open_with_path: None,
                 open_with_handlers: Vec::new(),
@@ -409,6 +420,17 @@ impl FilesView {
             return false;
         };
 
+        if state.file_activation.is_none()
+            && (state.activation_modifiers.shortcut() || state.activation_modifiers.shift())
+        {
+            state.browser.select_modified(
+                entry.path,
+                state.activation_modifiers.shortcut(),
+                state.activation_modifiers.shift(),
+            );
+            state.last_click = None;
+            return true;
+        }
         state.browser.select(entry.path.clone());
         let now = Instant::now();
         let is_double_click = state.last_click.as_ref().is_some_and(|(path, clicked_at)| {
@@ -626,9 +648,54 @@ impl FilesView {
         }
     }
 
+    fn confirm_delete(
+        state: &mut FilesState,
+        position: Point,
+        context: &mut EventContext<'_>,
+    ) -> bool {
+        let paths = state.browser.selected_paths();
+        if paths.is_empty() || state.operation.is_some() {
+            return false;
+        }
+        let label = if paths.len() == 1 {
+            format!(
+                "Permanently Delete \"{}\"",
+                paths[0].file_name().unwrap_or_default().to_string_lossy()
+            )
+        } else {
+            format!("Permanently Delete {} Items", paths.len())
+        };
+        state.pending_delete = Some(paths);
+        Self::show_context_menu(
+            state,
+            position,
+            vec![
+                ContextMenuItem {
+                    command_id: CONTEXT_COMMAND_CONFIRM_DELETE,
+                    label,
+                    enabled: true,
+                    checked: false,
+                    destructive: true,
+                    separator: false,
+                },
+                ContextMenuItem {
+                    command_id: CONTEXT_COMMAND_CANCEL_DELETE,
+                    label: "Cancel".into(),
+                    enabled: true,
+                    checked: false,
+                    destructive: false,
+                    separator: false,
+                },
+            ],
+            context,
+        );
+        true
+    }
+
     fn clipboard_selection(state: &mut FilesState, kind: Kind) -> bool {
-        if let Some(path) = state.browser.selected() {
-            if let Err(error) = file_clipboard::set(kind, path) {
+        let paths = state.browser.selected_paths();
+        if !paths.is_empty() {
+            if let Err(error) = file_clipboard::set_many(kind, &paths) {
                 state.browser.report_error(error);
             }
         }
@@ -636,32 +703,46 @@ impl FilesView {
     }
 
     fn start_operation(state: &mut FilesState, kind: Kind, source: PathBuf) -> bool {
+        Self::start_operations(state, kind, vec![source])
+    }
+    fn start_operations(state: &mut FilesState, kind: Kind, sources: Vec<PathBuf>) -> bool {
         if state.operation.is_some() || !Self::commit_name_edit(state) {
             return false;
         }
-        // The preview must never modify files outside its isolated home.
         let root = state.browser.root_directory();
-        if !source
-            .parent()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .is_some_and(|p| p.starts_with(root))
-            || source.file_name().is_none()
-        {
+        if sources.len() > 1024 {
             state
                 .browser
-                .report_error("The item is outside the available filesystem");
+                .report_error("Select up to 1024 items per batch");
             return true;
         }
-        match Operation::new(kind, source, state.browser.current_dir()) {
-            Ok(operation) => state.operation = Some(operation),
+        if sources.is_empty() {
+            return false;
+        }
+        if sources.iter().any(|source| {
+            source.file_name().is_none()
+                || !source
+                    .parent()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .is_some_and(|parent| parent.starts_with(root))
+        }) {
+            state
+                .browser
+                .report_error("An item is outside the available filesystem");
+            return true;
+        }
+        match Operation::new_many(kind, sources, state.browser.current_dir()) {
+            Ok(operation) => {
+                state.operation_summary = None;
+                state.operation = Some(operation);
+            }
             Err(error) => state.browser.report_error(error.to_string()),
         }
         true
     }
-
     fn paste(state: &mut FilesState) -> bool {
-        if let Some((kind, source)) = file_clipboard::get() {
-            Self::start_operation(state, kind, source)
+        if let Some((kind, sources)) = file_clipboard::get() {
+            Self::start_operations(state, kind, sources)
         } else {
             false
         }
@@ -669,21 +750,32 @@ impl FilesView {
 
     fn operation_frame(bounds: Rect) -> Rect {
         let content = Layout::new(bounds).content;
+        let compact = content.size.width < 400.;
+        let width = if compact {
+            (bounds.size.width - 32.).max(0.)
+        } else {
+            content.size.width
+        };
+        let height = if compact { 148. } else { 116. };
         Rect::new(
-            content.origin.x,
-            (bounds.origin.y + bounds.size.height - 88.0).max(content.origin.y),
-            content.size.width,
-            88.0_f32.min(content.size.height),
+            if compact {
+                bounds.origin.x + 16.
+            } else {
+                content.origin.x
+            },
+            (bounds.origin.y + bounds.size.height - height).max(content.origin.y),
+            width,
+            height.min(content.size.height),
         )
     }
-
     fn operation_button(frame: Rect, index: usize) -> Rect {
-        let width = ((frame.size.width - 40.0) / 4.0).clamp(0.0, 84.0);
+        let columns = if frame.size.width < 400. { 2 } else { 3 };
+        let width = ((frame.size.width - 32.) / columns as f32 - 8.).clamp(0., 104.);
         Rect::new(
-            frame.origin.x + frame.size.width - 16.0 - width - index as f32 * (width + 8.0),
-            frame.origin.y + 45.0,
+            frame.origin.x + 16. + (index % columns) as f32 * (width + 8.),
+            frame.origin.y + 42. + (index / columns) as f32 * 32.,
             width,
-            28.0,
+            28.,
         )
     }
 
@@ -695,25 +787,57 @@ impl FilesView {
         operation.tick();
         let result = operation.take_result();
         if let Some(result) = result {
-            let kind = operation.kind;
-            let source = operation.source.clone();
-            state.operation = None;
+            let operation = state.operation.take().unwrap();
+            if operation.kind == Kind::Move {
+                let moved: Vec<_> = result
+                    .completed
+                    .iter()
+                    .map(|(source, _)| source.clone())
+                    .collect();
+                file_clipboard::clear_moved(&operation.sources, &moved);
+            }
+            let previous = state.browser.selected_paths();
             state.browser.reload();
             state.folder_tree = FolderTree::new(state.browser.root_directory().to_path_buf());
             refresh_document_icons(&mut state);
-            match result {
-                Ok(Outcome::Completed(destination)) => {
-                    if kind == Kind::Move {
-                        file_clipboard::clear_move(&source);
-                    }
-                    if let Some(path) = destination {
-                        if path.parent() == Some(state.browser.current_dir()) {
-                            state.browser.select(path);
-                        }
-                    }
+            let destinations: Vec<_> = result
+                .completed
+                .iter()
+                .filter_map(|(_, destination)| destination.clone())
+                .filter(|path| path.parent() == Some(state.browser.current_dir()))
+                .collect();
+            state.browser.select_paths(if destinations.is_empty() {
+                previous
+            } else {
+                destinations
+            });
+            state.operation_summary = Some(format!(
+                "{}{} of {} completed · {} skipped · {} failed{}",
+                if result.cancelled {
+                    "Cancelled · "
+                } else {
+                    ""
+                },
+                result.completed.len(),
+                result.total,
+                result.skipped,
+                result.failed,
+                if result.cancelled && operation.kind == Kind::Delete {
+                    " · Deleted items cannot be restored"
+                } else {
+                    ""
                 }
-                Err(error) => state.browser.report_error(error),
-                _ => {}
+            ));
+            if !result.errors.is_empty() {
+                state.browser.report_error(
+                    result
+                        .errors
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
         }
     }
@@ -754,6 +878,26 @@ impl View for FilesView {
         viewkit::prelude::Surface::app().paint(bounds, context);
         paint_toolbar(&layout, &state, context);
         standard_ui::paint_split(&layout, &state, context);
+        if state.operation.is_none() {
+            let mut status = format!(
+                "{} items · {} selected",
+                state.browser.entries().len(),
+                state.browser.selection_count()
+            );
+            if let Some(summary) = &state.operation_summary {
+                status.push_str(" · ");
+                status.push_str(summary);
+            }
+            Text::caption(status).single_line(true).paint(
+                Rect::new(
+                    layout.content.origin.x + 16.,
+                    bounds.origin.y + bounds.size.height - 24.,
+                    (layout.content.size.width - 32.).max(0.),
+                    24.,
+                ),
+                context,
+            );
+        }
         if let Some(operation) = &state.operation {
             let frame = Self::operation_frame(bounds);
             viewkit::prelude::Surface::pane().paint(frame, context);
@@ -770,16 +914,22 @@ impl View for FilesView {
                     .unwrap_or_default()
                     .to_string_lossy();
                 if operation.kind == Kind::Delete {
-                    format!("{label} “{name}” — {} items (permanent)", operation.items)
+                    format!(
+                        "{label} “{name}” — {} of {} completed · {} entries (permanent)",
+                        operation.processed(),
+                        operation.total(),
+                        operation.items
+                    )
                 } else {
                     format!(
-                        "{label} “{name}” — {} items · {}",
-                        operation.items,
+                        "{label} “{name}” — {} of {} completed · {}",
+                        operation.processed(),
+                        operation.total(),
                         crate::browser::format_size(operation.bytes)
                     )
                 }
             };
-            Text::label(message).paint(
+            Text::label(message).single_line(true).paint(
                 Rect::new(
                     frame.origin.x + 16.0,
                     frame.origin.y + 12.0,
@@ -808,12 +958,33 @@ impl View for FilesView {
         event: &ViewEvent,
         context: &mut EventContext<'_>,
     ) -> EventResult {
+        match event {
+            ViewEvent::ModifiersChanged { modifiers }
+            | ViewEvent::KeyPressed { modifiers, .. }
+            | ViewEvent::KeyReleased { modifiers, .. } => {
+                self.state.borrow_mut().modifiers = *modifiers
+            }
+            ViewEvent::FocusChanged { focused: false } => {
+                self.state.borrow_mut().modifiers = Default::default()
+            }
+            _ => {}
+        }
+        if matches!(
+            event,
+            ViewEvent::PointerPressed {
+                button: PointerButton::Primary,
+                ..
+            } | ViewEvent::KeyPressed { .. }
+        ) {
+            let mut state = self.state.borrow_mut();
+            state.activation_modifiers = state.modifiers;
+        }
         if self.quick_look.borrow().is_open() {
             let outcome = self.quick_look.borrow_mut().handle(bounds, event, context);
             match outcome {
                 crate::quick_look::Outcome::Selected(path) => {
                     let mut state = self.state.borrow_mut();
-                    state.browser.select(path);
+                    state.browser.context_select(path);
                     state.last_click = None;
                 }
                 crate::quick_look::Outcome::Open(path) => {
@@ -840,15 +1011,24 @@ impl View for FilesView {
                 && !state.path_focused
                 && !state.search_focused
             {
-                if let Some(selected) = state.browser.selected() {
-                    let paths = state
-                        .browser
-                        .entries()
-                        .iter()
-                        .filter(|entry| !entry.is_directory())
-                        .map(|entry| entry.path.clone())
-                        .collect();
-                    if self.quick_look.borrow_mut().show(paths, selected) {
+                let group = state.browser.selection_count() > 1;
+                let paths: Vec<_> = state
+                    .browser
+                    .entries()
+                    .iter()
+                    .filter(|entry| {
+                        !entry.is_directory() && (!group || state.browser.is_selected(&entry.path))
+                    })
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                let selected = state
+                    .browser
+                    .selected()
+                    .filter(|path| paths.iter().any(|entry| entry == path))
+                    .map(Path::to_path_buf)
+                    .or_else(|| group.then(|| paths.first().cloned()).flatten());
+                if let Some(selected) = selected {
+                    if self.quick_look.borrow_mut().show(paths, &selected) {
                         context.request_redraw();
                         return EventResult::Consumed;
                     }
@@ -889,6 +1069,8 @@ impl View for FilesView {
                         OperationAction::Replace => operation.resolve(Collision::Replace),
                         OperationAction::KeepBoth => operation.resolve(Collision::KeepBoth),
                         OperationAction::Skip => operation.resolve(Collision::Skip),
+                        OperationAction::ReplaceAll => operation.resolve_all(Collision::Replace),
+                        OperationAction::SkipAll => operation.resolve_all(Collision::Skip),
                     };
                     if let Err(error) = result {
                         state.browser.report_error(error.to_string());
@@ -899,6 +1081,36 @@ impl View for FilesView {
             }
             if event.position().is_some_and(|p| frame.contains(p)) {
                 return EventResult::Consumed;
+            }
+        }
+        if matches!(event, ViewEvent::SelectAll) {
+            let mut state = self.state.borrow_mut();
+            if !state.path_focused
+                && !state.search_focused
+                && state.name_edit.is_none()
+                && state.file_activation.is_none()
+            {
+                state.browser.select_all();
+                state.last_click = None;
+                context.request_redraw();
+                return EventResult::Consumed;
+            }
+        }
+        if matches!(event, ViewEvent::Delete) {
+            let mut state = self.state.borrow_mut();
+            if !state.path_focused
+                && !state.search_focused
+                && state.name_edit.is_none()
+                && state.file_activation.is_none()
+            {
+                if Self::confirm_delete(
+                    &mut state,
+                    Point::new(layout.content.origin.x + 24., layout.content.origin.y + 24.),
+                    context,
+                ) {
+                    context.request_redraw();
+                    return EventResult::Consumed;
+                }
             }
         }
         if standard_ui::handle(self, &layout, event, context) {
@@ -957,7 +1169,7 @@ impl View for FilesView {
                 let selected_entry = if let Some(HitTarget::Entry(index)) = target.as_ref() {
                     let entry = state.browser.entries().get(*index).cloned().cloned();
                     if let Some(entry) = entry {
-                        state.browser.select(entry.path.clone());
+                        state.browser.context_select(entry.path.clone());
                         Some(entry)
                     } else {
                         None
@@ -1003,7 +1215,7 @@ impl View for FilesView {
                         destructive: false,
                         separator: false,
                     }];
-                    if !entry.is_directory() {
+                    if !entry.is_directory() && state.browser.selection_count() == 1 {
                         items.push(ContextMenuItem {
                             command_id: CONTEXT_COMMAND_PREVIEW,
                             label: String::from("Quick Look"),
@@ -1033,7 +1245,7 @@ impl View for FilesView {
                         ContextMenuItem {
                             command_id: CONTEXT_COMMAND_ADD_TO_SIDEBAR,
                             label: String::from("Add to Sidebar"),
-                            enabled: !sidebar_contains,
+                            enabled: !sidebar_contains && state.browser.selection_count() == 1,
                             checked: false,
                             destructive: false,
                             separator: false,
@@ -1049,7 +1261,7 @@ impl View for FilesView {
                         ContextMenuItem {
                             command_id: CONTEXT_COMMAND_RENAME,
                             label: String::from("Rename"),
-                            enabled: true,
+                            enabled: state.browser.selection_count() == 1,
                             checked: false,
                             destructive: false,
                             separator: false,
@@ -1242,6 +1454,9 @@ impl View for FilesView {
                         true
                     }
                     Some(CONTEXT_COMMAND_RENAME) => {
+                        if state.browser.selection_count() != 1 {
+                            return EventResult::Consumed;
+                        }
                         let selected = state.browser.selected().map(Path::to_path_buf);
                         if let Some(path) = selected {
                             let name = path
@@ -1253,38 +1468,13 @@ impl View for FilesView {
                         true
                     }
                     Some(CONTEXT_COMMAND_DELETE) => {
-                        state.pending_delete = state.browser.selected().map(Path::to_path_buf);
-                        if let Some(path) = state.pending_delete.as_ref() {
-                            let name = path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.display().to_string());
-                            let items = vec![
-                                ContextMenuItem {
-                                    command_id: CONTEXT_COMMAND_CONFIRM_DELETE,
-                                    label: format!("Permanently Delete \"{name}\""),
-                                    enabled: true,
-                                    checked: false,
-                                    destructive: true,
-                                    separator: false,
-                                },
-                                ContextMenuItem {
-                                    command_id: CONTEXT_COMMAND_CANCEL_DELETE,
-                                    label: String::from("Cancel"),
-                                    enabled: true,
-                                    checked: false,
-                                    destructive: false,
-                                    separator: false,
-                                },
-                            ];
-                            let anchor = state.context_anchor;
-                            Self::show_context_menu(&mut state, anchor, items, context);
-                        }
+                        let anchor = state.context_anchor;
+                        Self::confirm_delete(&mut state, anchor, context);
                         false
                     }
                     Some(CONTEXT_COMMAND_CONFIRM_DELETE) => {
                         if let Some(path) = state.pending_delete.take() {
-                            Self::start_operation(&mut state, Kind::Delete, path)
+                            Self::start_operations(&mut state, Kind::Delete, path)
                         } else {
                             false
                         }
@@ -1357,6 +1547,26 @@ impl View for FilesView {
                 }
                 EventResult::Consumed
             }
+            ViewEvent::ArrowLeft
+            | ViewEvent::ArrowRight
+            | ViewEvent::SelectLeft
+            | ViewEvent::SelectRight => {
+                let mut state = self.state.borrow_mut();
+                if state.path_focused || state.search_focused || state.name_edit.is_some() {
+                    return EventResult::Ignored;
+                }
+                let offset = if matches!(event, ViewEvent::ArrowLeft | ViewEvent::SelectLeft) {
+                    -1
+                } else {
+                    1
+                };
+                let extend = matches!(event, ViewEvent::SelectLeft | ViewEvent::SelectRight)
+                    && state.file_activation.is_none();
+                state.browser.select_relative_modified(offset, extend);
+                standard_ui::focus_selected(&layout, &mut state, context);
+                context.request_redraw();
+                EventResult::Consumed
+            }
             ViewEvent::KeyPressed { key, modifiers } => {
                 let mut state = self.state.borrow_mut();
                 if modifiers.shortcut()
@@ -1365,6 +1575,10 @@ impl View for FilesView {
                     && state.name_edit.is_none()
                 {
                     let handled = match key {
+                        Key::Character('a' | 'A') if state.file_activation.is_none() => {
+                            state.browser.select_all();
+                            true
+                        }
                         Key::Character('c' | 'C') => {
                             Self::clipboard_selection(&mut state, Kind::Copy)
                         }
@@ -1397,12 +1611,24 @@ impl View for FilesView {
                         true
                     }
                     Key::ArrowUp if !state.path_focused && state.name_edit.is_none() => {
-                        state.browser.select_relative(-1);
+                        let extend = modifiers.shift() && state.file_activation.is_none();
+                        let offset = if state.browser.view_mode() == ViewMode::Grid {
+                            -(grid_column_count(layout.content) as isize)
+                        } else {
+                            -1
+                        };
+                        state.browser.select_relative_modified(offset, extend);
                         standard_ui::focus_selected(&layout, &mut state, context);
                         true
                     }
                     Key::ArrowDown if !state.path_focused && state.name_edit.is_none() => {
-                        state.browser.select_relative(1);
+                        let extend = modifiers.shift() && state.file_activation.is_none();
+                        let offset = if state.browser.view_mode() == ViewMode::Grid {
+                            grid_column_count(layout.content) as isize
+                        } else {
+                            1
+                        };
+                        state.browser.select_relative_modified(offset, extend);
                         standard_ui::focus_selected(&layout, &mut state, context);
                         true
                     }
@@ -1478,12 +1704,17 @@ impl Layout {
                 Theme::current().layout.top_bar_height,
             ),
             sidebar,
-            content,
+            content: Rect::new(
+                content.origin.x,
+                content.origin.y,
+                content.size.width,
+                (content.size.height - 24.).max(0.),
+            ),
             status: Rect::new(
-                bounds.origin.x,
-                bounds.origin.y + bounds.size.height,
-                bounds.size.width,
-                0.0,
+                content.origin.x,
+                bounds.origin.y + bounds.size.height - 24.,
+                content.size.width,
+                24.0,
             ),
             sidebar_width,
         }

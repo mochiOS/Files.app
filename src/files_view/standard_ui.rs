@@ -593,7 +593,7 @@ fn content_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
             {
                 return None;
             }
-            let selected = state.browser.selected() == Some(entry.path.as_path());
+            let selected = state.browser.is_selected(&entry.path);
             Some(Placed::new(
                 bounds,
                 ListRow::with_interaction(
@@ -969,6 +969,87 @@ mod tests {
         }
     }
 
+    fn click_entry(view: &FilesView, index: usize, bits: u8) {
+        let layout = Layout::new(Rect::new(0., 0., 920., 640.));
+        let rect = entry_rect(&layout, &view.state.borrow(), index);
+        let position = Point::new(rect.origin.x + 30., rect.origin.y + 20.);
+        send(
+            view,
+            ViewEvent::ModifiersChanged {
+                modifiers: KeyModifiers::from_bits(bits),
+            },
+        );
+        send(
+            view,
+            ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Primary,
+            },
+        );
+        // Releasing Ctrl before the mouse must retain press-time intent.
+        send(
+            view,
+            ViewEvent::ModifiersChanged {
+                modifiers: KeyModifiers::default(),
+            },
+        );
+        send(
+            view,
+            ViewEvent::PointerReleased {
+                position,
+                button: PointerButton::Primary,
+            },
+        );
+    }
+    #[test]
+    fn ctrl_shift_click_and_right_click_keep_the_selected_group() {
+        let (root, view) = fixture();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        view.state.borrow_mut().browser.reload();
+        click_entry(&view, 1, 0);
+        click_entry(&view, 3, KeyModifiers::CONTROL);
+        assert_eq!(view.state.borrow().browser.selection_count(), 2);
+        click_entry(&view, 4, KeyModifiers::SHIFT);
+        assert_eq!(view.state.borrow().browser.selection_count(), 2);
+        let layout = Layout::new(Rect::new(0., 0., 920., 640.));
+        let row = entry_rect(&layout, &view.state.borrow(), 3);
+        send(
+            &view,
+            ViewEvent::PointerPressed {
+                position: Point::new(row.origin.x + 30., row.origin.y + 20.),
+                button: PointerButton::Secondary,
+            },
+        );
+        assert_eq!(view.state.borrow().browser.selection_count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn select_all_and_delete_confirm_the_group_without_early_writes() {
+        let (root, view) = fixture();
+        send(&view, ViewEvent::SelectAll);
+        assert_eq!(view.state.borrow().browser.selection_count(), 2);
+        send(&view, ViewEvent::Delete);
+        let count = view.state.borrow().pending_delete.as_ref().unwrap().len();
+        assert_eq!(count, 2);
+        assert!(root.join("child").exists() && root.join("note.txt").exists());
+        let request = view.state.borrow().active_context_request.unwrap();
+        send(
+            &view,
+            ViewEvent::ContextMenuResult {
+                request_id: request,
+                command_id: Some(CONTEXT_COMMAND_CANCEL_DELETE),
+            },
+        );
+        assert!(view.state.borrow().operation.is_none());
+        view.state.borrow_mut().path_focused = true;
+        view.state.borrow_mut().browser.clear_selection();
+        send(&view, ViewEvent::SelectAll);
+        assert_eq!(view.state.borrow().browser.selection_count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn space_previews_selected_file_and_escape_preserves_browser_selection() {
         let (root, view) = fixture();
@@ -1181,6 +1262,7 @@ mod tests {
         {
             let mut state = view.state.borrow_mut();
             state.browser.reload();
+            state.browser.set_view_mode(ViewMode::List);
             state.browser.select(root.join("child"));
         }
         let layout = Layout::new(Rect::new(0., 0., 920., 640.));
