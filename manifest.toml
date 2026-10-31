@@ -37,6 +37,7 @@ requires = [
     "fs.write.user",
     "file-association.read",
     "file-association.write",
+    "process.spawn",
     "ipc.client",
     "ipc.server",
     "window.create",

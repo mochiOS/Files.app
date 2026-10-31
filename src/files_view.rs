@@ -84,6 +84,7 @@ struct FileIcons {
     folder: Option<SvgData>,
     file: Option<SvgData>,
     documents: BTreeMap<String, ImageData>,
+    thumbnails: crate::thumbnails::Thumbnails,
 }
 
 impl FileIcons {
@@ -93,20 +94,25 @@ impl FileIcons {
             folder: SvgData::decode(FOLDER_SVG).ok(),
             file: SvgData::decode(FILE_SVG).ok(),
             documents: BTreeMap::new(),
+            thumbnails: crate::thumbnails::Thumbnails::new(),
         }
     }
 
     fn refresh_documents(&mut self, entries: Vec<FileEntry>) {
         self.documents = load_default_document_icons(&entries);
+        self.thumbnails.invalidate();
     }
 
-    fn document(&self, entry: &FileEntry) -> Option<&ImageData> {
+    fn document(&self, entry: &FileEntry) -> Option<ImageData> {
+        if let Some(image) = self.thumbnails.image(&entry.path) {
+            return Some(image);
+        }
         let extension = entry
             .path
             .extension()
             .and_then(|extension| extension.to_str())?
             .to_ascii_lowercase();
-        self.documents.get(&extension)
+        self.documents.get(&extension).cloned()
     }
 
     fn entry(&self, entry: &FileEntry) -> Option<&SvgData> {
@@ -532,11 +538,19 @@ impl FilesView {
         match target {
             Some(HitTarget::Back) => {
                 let changed = state.browser.go_back();
+                if changed {
+                    refresh_document_icons(state);
+                    state.last_click = None;
+                }
                 state.scroll = 0.0;
                 changed
             }
             Some(HitTarget::Forward) => {
                 let changed = state.browser.go_forward();
+                if changed {
+                    refresh_document_icons(state);
+                    state.last_click = None;
+                }
                 state.scroll = 0.0;
                 changed
             }
@@ -727,6 +741,11 @@ impl View for FilesView {
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
         self.advance_operation();
         let layout = Layout::new(bounds);
+        {
+            let mut state = self.state.borrow_mut();
+            let paths = standard_ui::thumbnail_paths(&layout, &state);
+            state.icons.thumbnails.request(paths);
+        }
         let state = self.state.borrow();
 
         viewkit::prelude::Surface::app().paint(bounds, context);

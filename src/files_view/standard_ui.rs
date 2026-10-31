@@ -259,7 +259,6 @@ fn file_image(state: &FilesState, entry: &FileEntry) -> FileImage {
     state
         .icons
         .document(entry)
-        .cloned()
         .map(FileImage::Raster)
         .or_else(|| state.icons.entry(entry).cloned().map(FileImage::Vector))
         .unwrap_or(FileImage::Missing)
@@ -559,6 +558,26 @@ impl View for EntryContent {
             }
         }
     }
+}
+
+// Match row virtualization: scrolling requests newly visible files, never the
+// whole directory. The worker/cache bounds therefore apply at any directory size.
+pub(super) fn thumbnail_paths(layout: &Layout, state: &FilesState) -> Vec<PathBuf> {
+    let top = layout.content.origin.y + header_height(state.browser.view_mode(), &Theme::current());
+    state
+        .browser
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(index, entry)| {
+            let bounds = entry_rect(layout, state, *index);
+            !entry.is_directory()
+                && bounds.origin.y + bounds.size.height > top
+                && bounds.origin.y < layout.status.origin.y
+        })
+        .take(128)
+        .map(|(_, entry)| entry.path.clone())
+        .collect()
 }
 
 fn content_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
@@ -948,6 +967,49 @@ mod tests {
             key,
             modifiers: KeyModifiers::default(),
         }
+    }
+
+    #[test]
+    fn history_navigation_replaces_icons_from_the_previous_directory() {
+        let (root, view) = fixture();
+        let layout = Layout::new(Rect::new(0., 0., 920., 640.));
+        {
+            let mut state = view.state.borrow_mut();
+            assert!(FilesView::navigate(&mut state, root.join("child")));
+            for target in [HitTarget::Back, HitTarget::Forward] {
+                state.icons.documents.insert(
+                    "sentinel".into(),
+                    ImageData::from_rgba8(1, 1, vec![255; 4]).unwrap(),
+                );
+                assert!(FilesView::apply_target(&mut state, &layout, Some(target)));
+                assert!(!state.icons.documents.contains_key("sentinel"));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn thumbnails_follow_the_visible_grid_after_scrolling() {
+        let (root, view) = fixture();
+        for index in 0..200 {
+            std::fs::write(root.join(format!("image-{index:03}.png")), []).unwrap();
+        }
+        let layout = Layout::new(Rect::new(0., 0., 920., 640.));
+        {
+            let mut state = view.state.borrow_mut();
+            state.browser.reload();
+            assert_eq!(state.browser.view_mode(), ViewMode::Grid);
+            let first = thumbnail_paths(&layout, &state);
+            assert!(!first.is_empty() && first.len() < 40);
+            state.scroll = maximum_scroll(&layout, &state);
+            let last = thumbnail_paths(&layout, &state);
+            assert!(
+                last.iter()
+                    .any(|path| path.file_name().unwrap() == "image-199.png")
+            );
+            assert!(!last.iter().any(|path| first.contains(path)));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
