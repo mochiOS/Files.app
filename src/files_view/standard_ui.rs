@@ -121,6 +121,7 @@ fn toolbar_button(
 ) -> Button {
     Button::with_interaction_and_label(state.controls.button(label), "")
         .leading_symbol(symbol)
+        .toolbar()
         .size(ButtonSize::Small)
         .enabled(enabled)
         .style(if selected {
@@ -134,7 +135,7 @@ fn toolbar_button(
 }
 
 fn toolbar(state: &FilesState) -> impl View {
-    let side = Theme::current().layout.compact_control_height;
+    let side = Theme::current().layout.icon_button_size;
     Toolbar::new(
         HStack::new()
             .gap(viewkit::prelude::StackGap::Small)
@@ -229,6 +230,7 @@ pub(super) fn paint_split(layout: &Layout, state: &FilesState, context: &mut Pai
             sidebar: false,
         },
     )
+    .shows_divider(false)
     .sidebar_insets(viewkit::edge_insets::EdgeInsets::ZERO)
     .paint(body, context);
 }
@@ -341,6 +343,7 @@ fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
             } else {
                 IconName::ChevronRight
             })
+            .toolbar()
             .size(ButtonSize::Small)
             .style(ButtonStyle::Ghost)
             .accessibility_label(if row.expanded {
@@ -521,6 +524,7 @@ impl View for EntryContent {
                 },
             )
             .center_visible_ink(true)
+            .single_line(true)
             .alignment(if self.mode == ViewMode::List {
                 TextAlignment::Start
             } else {
@@ -540,6 +544,7 @@ impl View for EntryContent {
             {
                 Text::caption(text)
                     .center_visible_ink(true)
+                    .single_line(true)
                     .tone(if self.selected {
                         TextTone::Primary
                     } else {
@@ -656,7 +661,7 @@ pub(super) fn paint_content(layout: &Layout, state: &FilesState, context: &mut P
             layout.content.size.width,
             height,
         );
-        Surface::pane().paint(header, context);
+        Surface::sidebar().paint(header, context);
         for (index, title) in ["Name", "Date Modified", "Size", "Kind"]
             .into_iter()
             .enumerate()
@@ -664,6 +669,7 @@ pub(super) fn paint_content(layout: &Layout, state: &FilesState, context: &mut P
             Text::caption(title)
                 .tone(TextTone::Secondary)
                 .center_visible_ink(true)
+                .single_line(true)
                 .paint(list_columns(header)[index], context);
         }
     } else {

@@ -1422,6 +1422,7 @@ impl Layout {
             viewkit::prelude::HStack::new(),
             viewkit::prelude::HStack::new(),
         )
+        .shows_divider(false)
         .content_regions(body, &theme);
         let sidebar_width = sidebar.size.width;
         Self {
@@ -1473,44 +1474,22 @@ fn maximum_sidebar_scroll(layout: &Layout, state: &FilesState) -> f32 {
 
 fn list_columns(bounds: Rect) -> [Rect; 4] {
     let theme = Theme::current();
-    let spacing = theme.spacing;
-    let width = bounds.size.width;
-    let name = (width / 2.0)
-        .max(theme.layout.navigation_sidebar_width)
-        .min(width);
-    let modified = (width / 4.0)
-        .max(theme.layout.control_min_width)
-        .min((width - name).max(0.0));
-    let size = theme
-        .layout
-        .control_min_width
-        .min((width - name - modified).max(0.0));
-    [
-        Rect::new(
-            bounds.origin.x + spacing.medium,
-            bounds.origin.y + spacing.extra_small,
-            (name - spacing.large).max(0.0),
-            bounds.size.height - spacing.small,
-        ),
-        Rect::new(
-            bounds.origin.x + name,
-            bounds.origin.y + spacing.extra_small,
-            (modified - spacing.medium).max(0.0),
-            bounds.size.height - spacing.small,
-        ),
-        Rect::new(
-            bounds.origin.x + name + modified,
-            bounds.origin.y + spacing.extra_small,
-            (size - spacing.large).max(0.0),
-            bounds.size.height - spacing.small,
-        ),
-        Rect::new(
-            bounds.origin.x + name + modified + size + spacing.medium,
-            bounds.origin.y + spacing.extra_small,
-            (width - name - modified - size - spacing.extra_large).max(0.0),
-            bounds.size.height - spacing.small,
-        ),
-    ]
+    let gap = theme.spacing.medium;
+    let width = bounds.size.width.max(0.);
+    // Content columns use the spacing grid, not button minimum widths.
+    let unit = theme.spacing.extra_large;
+    let name_min = unit * 8.;
+    let size_width = if width >= unit * 7. + gap * 3. { unit * 3. } else { 0. };
+    let kind_width = if width >= name_min + unit * 7. + gap * 4. { unit * 4. } else { 0. };
+    let date_width = if width >= name_min + unit * 13. + gap * 5. { unit * 6. } else { 0. };
+    let visible = 1 + usize::from(size_width > 0.) + usize::from(kind_width > 0.) + usize::from(date_width > 0.);
+    let name_width = (width - gap * (visible + 1) as f32 - size_width - kind_width - date_width).max(0.);
+    let mut x = bounds.origin.x + gap;
+    [name_width, date_width, size_width, kind_width].map(|width| {
+        let rect = Rect::new(x, bounds.origin.y, width, bounds.size.height);
+        if width > 0. { x += width + gap; }
+        rect
+    })
 }
 
 fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarget> {
@@ -1609,6 +1588,25 @@ fn grid_column_count(content: Rect) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_columns_prioritize_names_and_hide_optional_metadata_when_narrow() {
+        let wide = list_columns(Rect::new(0., 0., 680., 28.));
+        assert!(wide.iter().all(|column| column.size.width > 0.));
+        let narrow = list_columns(Rect::new(0., 0., 400., 28.));
+        assert_eq!(narrow[1].size.width, 0.);
+        assert_eq!(narrow[3].size.width, 0.);
+        assert!(narrow[0].size.width > narrow[2].size.width);
+        for width in [160., 220., 400., 680., 1200.] {
+            let mut right = 0.;
+            for column in list_columns(Rect::new(0., 0., width, 28.)) {
+                if column.size.width == 0. { continue; }
+                assert!(column.origin.x >= right);
+                right = column.origin.x + column.size.width;
+                assert!(right <= width);
+            }
+        }
+    }
 
     #[test]
     fn keyboard_copy_and_paste_runs_job_and_selects_completed_file() {
