@@ -135,93 +135,45 @@ fn uses_application_icon(entry: &FileEntry) -> bool {
     entry.kind == EntryKind::Application || entry.path == Path::new("/applications")
 }
 
-#[cfg(target_os = "mochios")]
 fn load_default_document_icons(entries: &[FileEntry]) -> BTreeMap<String, ImageData> {
-    let mut requested_extensions = entries
+    use appcore::document::{AssociationRoles, DocumentIconFormat, DocumentIconResolver};
+    let Ok(resolver) = DocumentIconResolver::new() else {
+        return BTreeMap::new();
+    };
+    let extensions = entries
         .iter()
         .filter(|entry| !entry.is_directory())
-        .filter_map(|entry| {
-            entry
-                .path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .map(str::to_ascii_lowercase)
-        })
-        .collect::<Vec<_>>();
-    requested_extensions.sort();
-    requested_extensions.dedup();
-
-    let applications = installed_application_icons();
-    requested_extensions
-        .into_iter()
-        .filter_map(|extension| {
-            let probe = PathBuf::from(format!("document.{extension}"));
-            let bundle_id = appcore::document::resolve_default(
-                &extension,
-                file_association::content_type(&probe),
-                appcore::document::AssociationRoles::VIEW,
-            )
-            .ok()?;
-            let icon = applications.get(&bundle_id)?.clone();
-            Some((extension, icon))
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "mochios"))]
-fn load_default_document_icons(_entries: &[FileEntry]) -> BTreeMap<String, ImageData> {
-    BTreeMap::new()
-}
-
-#[cfg(target_os = "mochios")]
-fn installed_application_icons() -> BTreeMap<String, ImageData> {
+        .filter_map(|entry| entry.path.extension().and_then(|value| value.to_str()))
+        .map(str::to_ascii_lowercase)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut decoded = BTreeMap::<(String, String), ImageData>::new();
     let mut icons = BTreeMap::new();
-    for applications_root in ["/system/applications", "/applications"] {
-        let Ok(entries) = std::fs::read_dir(applications_root) else {
+    for extension in extensions.into_iter().take(256) {
+        let probe = PathBuf::from(format!("document.{extension}"));
+        let Ok(Some(icon)) = resolver.resolve(
+            &extension,
+            file_association::content_type(&probe),
+            AssociationRoles::VIEW,
+        ) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let root = entry.path();
-            let Ok(manifest) = std::fs::read_to_string(root.join("manifest.toml")) else {
-                continue;
-            };
-            let Some(bundle_id) = metadata_string(&manifest, "id") else {
-                continue;
-            };
-            let Some(icon_name) = metadata_string(&manifest, "document_icon")
-                .or_else(|| metadata_string(&manifest, "icon"))
-            else {
-                continue;
-            };
-            let icon_path = root.join(icon_name);
-            let icon = if icon_path.extension().and_then(|value| value.to_str()) == Some("svg") {
-                SvgData::from_path(&icon_path)
+        let key = (icon.bundle_id.clone(), icon.resource.clone());
+        let image = decoded.get(&key).cloned().or_else(|| {
+            let image = match icon.format {
+                DocumentIconFormat::Svg => SvgData::decode(icon.data())
                     .ok()
-                    .and_then(|svg| ImageData::from_svg(&svg, 72, 72).ok())
-            } else {
-                ImageData::thumbnail_from_path(&icon_path, 72, 72).ok()
-            };
-            if let Some(icon) = icon {
-                icons.entry(bundle_id).or_insert(icon);
-            }
+                    .filter(|svg| svg.width() <= 1024. && svg.height() <= 1024.)
+                    .and_then(|svg| ImageData::from_svg(&svg, 72, 72).ok()),
+                DocumentIconFormat::Png => ImageData::decode(icon.data()).ok(),
+            }?;
+            decoded.insert(key, image.clone());
+            Some(image)
+        });
+        if let Some(image) = image {
+            icons.insert(extension, image);
         }
     }
     icons
-}
-
-#[cfg(target_os = "mochios")]
-fn metadata_string(content: &str, key: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let (candidate, value) = line.split_once('=')?;
-        if candidate.trim() != key {
-            return None;
-        }
-        value
-            .trim()
-            .strip_prefix('"')?
-            .strip_suffix('"')
-            .map(ToOwned::to_owned)
-    })
 }
 
 fn is_default_sidebar_path(home: &Path, path: &Path) -> bool {
@@ -1479,15 +1431,33 @@ fn list_columns(bounds: Rect) -> [Rect; 4] {
     // Content columns use the spacing grid, not button minimum widths.
     let unit = theme.spacing.extra_large;
     let name_min = unit * 8.;
-    let size_width = if width >= unit * 7. + gap * 3. { unit * 3. } else { 0. };
-    let kind_width = if width >= name_min + unit * 7. + gap * 4. { unit * 4. } else { 0. };
-    let date_width = if width >= name_min + unit * 13. + gap * 5. { unit * 6. } else { 0. };
-    let visible = 1 + usize::from(size_width > 0.) + usize::from(kind_width > 0.) + usize::from(date_width > 0.);
-    let name_width = (width - gap * (visible + 1) as f32 - size_width - kind_width - date_width).max(0.);
+    let size_width = if width >= unit * 7. + gap * 3. {
+        unit * 3.
+    } else {
+        0.
+    };
+    let kind_width = if width >= name_min + unit * 7. + gap * 4. {
+        unit * 4.
+    } else {
+        0.
+    };
+    let date_width = if width >= name_min + unit * 13. + gap * 5. {
+        unit * 6.
+    } else {
+        0.
+    };
+    let visible = 1
+        + usize::from(size_width > 0.)
+        + usize::from(kind_width > 0.)
+        + usize::from(date_width > 0.);
+    let name_width =
+        (width - gap * (visible + 1) as f32 - size_width - kind_width - date_width).max(0.);
     let mut x = bounds.origin.x + gap;
     [name_width, date_width, size_width, kind_width].map(|width| {
         let rect = Rect::new(x, bounds.origin.y, width, bounds.size.height);
-        if width > 0. { x += width + gap; }
+        if width > 0. {
+            x += width + gap;
+        }
         rect
     })
 }
@@ -1600,7 +1570,9 @@ mod tests {
         for width in [160., 220., 400., 680., 1200.] {
             let mut right = 0.;
             for column in list_columns(Rect::new(0., 0., width, 28.)) {
-                if column.size.width == 0. { continue; }
+                if column.size.width == 0. {
+                    continue;
+                }
                 assert!(column.origin.x >= right);
                 right = column.origin.x + column.size.width;
                 assert!(right <= width);
