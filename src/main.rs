@@ -6,6 +6,7 @@ mod folder_tree;
 mod operations;
 mod sidebar;
 mod thumbnails;
+mod quick_look;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

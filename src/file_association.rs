@@ -11,13 +11,27 @@ pub(crate) struct Handler {
 }
 
 pub(crate) fn content_type(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let kind = declared_content_type(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default(),
+    );
+    if kind == "application/octet-stream" && looks_like_utf8_text(path) {
+        "text/plain"
+    } else {
+        kind
+    }
+}
+
+/// Classifies a filename extension without opening a filesystem path.
+pub(crate) fn declared_content_type(extension: &str) -> &'static str {
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
         "ttf" => appcore::content_type::TRUE_TYPE_FONT,
         "otf" => appcore::content_type::OPEN_TYPE_FONT,
         "ttc" | "otc" => appcore::content_type::FONT_COLLECTION,
@@ -32,7 +46,6 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         "sh" => "text/x-shellscript",
         "yaml" | "yml" => "text/yaml",
         "txt" | "text" | "log" | "ini" | "conf" | "cfg" => "text/plain",
-        _ if looks_like_utf8_text(path) => "text/plain",
         _ => "application/octet-stream",
     }
 }

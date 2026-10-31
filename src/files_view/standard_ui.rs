@@ -970,6 +970,46 @@ mod tests {
     }
 
     #[test]
+    fn space_previews_selected_file_and_escape_preserves_browser_selection() {
+        let (root, view) = fixture();
+        view.state
+            .borrow_mut()
+            .browser
+            .select(root.join("note.txt"));
+        send(&view, key(Key::Space));
+        assert!(view.quick_look.borrow().is_open());
+        send(&view, ViewEvent::Delete);
+        assert!(root.join("note.txt").is_file());
+        send(&view, key(Key::Escape));
+        assert!(!view.quick_look.borrow().is_open());
+        assert_eq!(
+            view.state.borrow().browser.selected(),
+            Some(root.join("note.txt").as_path())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn space_keeps_text_fields_and_rename_editing_in_the_browser() {
+        let (root, view) = fixture();
+        {
+            let mut state = view.state.borrow_mut();
+            state.browser.select(root.join("note.txt"));
+            state.path_focused = true;
+        }
+        send(&view, key(Key::Space));
+        assert!(!view.quick_look.borrow().is_open());
+        view.state.borrow_mut().path_focused = false;
+        FilesView::begin_rename(
+            &mut view.state.borrow_mut(),
+            root.join("note.txt"),
+            "note.txt".into(),
+        );
+        send(&view, key(Key::Space));
+        assert!(!view.quick_look.borrow().is_open());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn history_navigation_replaces_icons_from_the_previous_directory() {
         let (root, view) = fixture();
         let layout = Layout::new(Rect::new(0., 0., 920., 640.));

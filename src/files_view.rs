@@ -43,6 +43,7 @@ const CONTEXT_COMMAND_SET_DEFAULT: u32 = 11;
 const CONTEXT_COMMAND_COPY: u32 = 12;
 const CONTEXT_COMMAND_CUT: u32 = 13;
 const CONTEXT_COMMAND_PASTE: u32 = 14;
+const CONTEXT_COMMAND_PREVIEW: u32 = 15;
 const CONTEXT_COMMAND_OPEN_WITH_FIRST_HANDLER: u32 = 1_000;
 const CONTEXT_COMMAND_SET_DEFAULT_FIRST_HANDLER: u32 = 2_000;
 
@@ -281,6 +282,7 @@ fn refresh_document_icons(state: &mut FilesState) {
 #[derive(Clone)]
 pub(crate) struct FilesView {
     state: Rc<RefCell<FilesState>>,
+    quick_look: Rc<RefCell<crate::quick_look::QuickLook>>,
     operation_action: Rc<Cell<Option<OperationAction>>>,
     operation_buttons: Rc<Vec<Button>>,
 }
@@ -348,6 +350,7 @@ impl FilesView {
         })
         .collect();
         Self {
+            quick_look: Rc::new(RefCell::new(crate::quick_look::QuickLook::new())),
             operation_action,
             operation_buttons: Rc::new(operation_buttons),
             state: Rc::new(RefCell::new(FilesState {
@@ -796,6 +799,7 @@ impl View for FilesView {
                 context.request_redraw_at(Instant::now() + Duration::from_millis(16));
             }
         }
+        self.quick_look.borrow().paint(bounds, context);
     }
 
     fn handle_event(
@@ -804,6 +808,53 @@ impl View for FilesView {
         event: &ViewEvent,
         context: &mut EventContext<'_>,
     ) -> EventResult {
+        if self.quick_look.borrow().is_open() {
+            let outcome = self.quick_look.borrow_mut().handle(bounds, event, context);
+            match outcome {
+                crate::quick_look::Outcome::Selected(path) => {
+                    let mut state = self.state.borrow_mut();
+                    state.browser.select(path);
+                    state.last_click = None;
+                }
+                crate::quick_look::Outcome::Open(path) => {
+                    let mut state = self.state.borrow_mut();
+                    state.browser.select(path);
+                    Self::open_selected(&mut state);
+                }
+                crate::quick_look::Outcome::Closed => {
+                    let mut state = self.state.borrow_mut();
+                    state.last_click = None;
+                    context.clear_keyboard_focus();
+                    standard_ui::focus_selected(&Layout::new(bounds), &mut state, context);
+                }
+                _ => {}
+            }
+            context.request_redraw();
+            return EventResult::Consumed;
+        }
+        if matches!(event, ViewEvent::KeyPressed { key: Key::Space, modifiers } if !modifiers.shortcut() && !modifiers.alt())
+        {
+            let state = self.state.borrow();
+            if state.operation.is_none()
+                && state.name_edit.is_none()
+                && !state.path_focused
+                && !state.search_focused
+            {
+                if let Some(selected) = state.browser.selected() {
+                    let paths = state
+                        .browser
+                        .entries()
+                        .iter()
+                        .filter(|entry| !entry.is_directory())
+                        .map(|entry| entry.path.clone())
+                        .collect();
+                    if self.quick_look.borrow_mut().show(paths, selected) {
+                        context.request_redraw();
+                        return EventResult::Consumed;
+                    }
+                }
+            }
+        }
         let layout = Layout::new(bounds);
         if self.state.borrow().operation.is_some() {
             let frame = Self::operation_frame(bounds);
@@ -953,6 +1004,14 @@ impl View for FilesView {
                         separator: false,
                     }];
                     if !entry.is_directory() {
+                        items.push(ContextMenuItem {
+                            command_id: CONTEXT_COMMAND_PREVIEW,
+                            label: String::from("Quick Look"),
+                            enabled: true,
+                            checked: false,
+                            destructive: false,
+                            separator: false,
+                        });
                         items.push(ContextMenuItem {
                             command_id: CONTEXT_COMMAND_OPEN_WITH,
                             label: String::from("Open With…"),
@@ -1113,6 +1172,20 @@ impl View for FilesView {
                     Some(CONTEXT_COMMAND_CUT) => Self::clipboard_selection(&mut state, Kind::Move),
                     Some(CONTEXT_COMMAND_PASTE) => Self::paste(&mut state),
                     Some(CONTEXT_COMMAND_OPEN) => Self::open_selected(&mut state),
+                    Some(CONTEXT_COMMAND_PREVIEW) => {
+                        if let Some(selected) = state.browser.selected() {
+                            let paths = state
+                                .browser
+                                .entries()
+                                .iter()
+                                .filter(|entry| !entry.is_directory())
+                                .map(|entry| entry.path.clone())
+                                .collect();
+                            self.quick_look.borrow_mut().show(paths, selected);
+                        }
+                        state.last_click = None;
+                        true
+                    }
                     Some(CONTEXT_COMMAND_OPEN_WITH) => {
                         let items = state
                             .open_with_handlers
