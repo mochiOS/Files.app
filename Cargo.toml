@@ -10,7 +10,7 @@ publish = false
 libc = { git = "https://github.com/mochiOS/libc", package = "libc" }
 appcore = { package = "mochios-appcore", path = "../../tools/devkit/crates/appcore" }
 mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
-viewkit = { path = "../../libraries/viewkit" }
+viewkit = { git = "https://github.com/mochiOS/viewkit", rev = "768d9f903f9ae4bb7b6c861cd2d1cd3e8fbc4d95" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { path = "../../user/crates/platform", default-features = false, features = ["std"] }
