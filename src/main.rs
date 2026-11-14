@@ -8,6 +8,7 @@ mod operations;
 mod sidebar;
 mod thumbnails;
 mod quick_look;
+mod default_application;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -81,7 +82,7 @@ impl SystemPanelBody {
                 let _ = complete_system_panel(&cancel_configuration, 1, Path::new(""));
             });
 
-        if configuration.mode == workspace_protocol::FILE_PANEL_MODE_OPEN {
+        if configuration.mode != workspace_protocol::FILE_PANEL_MODE_SAVE {
             let activated_configuration = configuration.clone();
             let allowed_content_types = configuration.allowed_content_types.clone();
             let files = FilesView::new_picker(
@@ -90,7 +91,7 @@ impl SystemPanelBody {
                 move |path| complete_system_panel(&activated_configuration, 0, path),
             );
             let accept_files = files.clone();
-            let accept = Button::new("Open")
+            let accept = Button::new(if configuration.mode == workspace_protocol::FILE_PANEL_MODE_EDIT { "Open for Editing" } else { "Open" })
                 .size(ButtonSize::Small)
                 .style(ButtonStyle::Accent)
                 .on_click(move || {
@@ -603,6 +604,7 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 }
 
 fn main() -> Result<(), ViewKitError> {
+    if let Some(result) = default_application::run_if_requested() { return result; }
     if let Some(configuration) =
         std::env::args().find_map(|argument| parse_system_panel_argument(&argument))
     {
