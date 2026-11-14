@@ -3,3 +3,4 @@
 *.lock
 /out/mdp/
 /.mdp/
+!mdp.lock

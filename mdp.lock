@@ -1,0 +1,10 @@
+{
+  "dependencies": [],
+  "format": 1,
+  "sdk": {
+    "abi": "mochios-1",
+    "id": "09195d32c61b787784afe9c426ed4a3689af37c897f086e5845fd485045626a3",
+    "kind": "built-source-sdk",
+    "target": "x86_64-mochios"
+  }
+}
