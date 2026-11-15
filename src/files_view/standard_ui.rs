@@ -72,11 +72,42 @@ impl Placed {
     }
 }
 
+// Home-relative labels avoid exposing a preview's host storage path while
+// leaving filesystem authorization and canonicalization in Browser.
+fn location_label(path: &Path, home: &Path) -> String {
+    if home != Path::new("/") {
+        if let Ok(relative) = path.strip_prefix(home) {
+            return if relative.as_os_str().is_empty() {
+                "~".into()
+            } else {
+                format!("~/{}", relative.display())
+            };
+        }
+    }
+    path.display().to_string()
+}
+pub(super) fn location_target(input: &str, home: &Path) -> PathBuf {
+    if input == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(relative) = input.strip_prefix("~/") {
+        return home.join(relative.trim_start_matches('/'));
+    }
+    PathBuf::from(input)
+}
+fn tree_root_title(root: &Path, home: &Path) -> &'static str {
+    if root == home && root != Path::new("/") {
+        "Home"
+    } else {
+        "/"
+    }
+}
+
 fn synchronize(state: &FilesState) {
     let path = if state.path_focused {
         state.path_input.clone()
     } else {
-        state.browser.current_dir().display().to_string()
+        location_label(state.browser.current_dir(), &state.home_directory)
     };
     if state.controls.path.value() != path {
         state.controls.path.set_value(path);
@@ -312,7 +343,7 @@ fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
         }
         let indent = (row.depth as f32 * 16.).min((layout.sidebar_width - 90.).max(0.));
         let title = if row.depth == 0 {
-            "/".into()
+            tree_root_title(state.browser.root_directory(), &state.home_directory).into()
         } else {
             row.path
                 .file_name()
@@ -920,7 +951,7 @@ pub(super) fn handle(
                 FilesView::commit_name_edit(&mut state);
             }
             Action::SubmitPath => {
-                let path = PathBuf::from(&state.path_input);
+                let path = location_target(&state.path_input, &state.home_directory);
                 if FilesView::navigate(&mut state, path) {
                     state.path_focused = false;
                 }
@@ -935,6 +966,27 @@ pub(super) fn handle(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn home_relative_location_navigates_through_the_existing_browser() {
+        let (root, view) = fixture();
+        {
+            let mut state = view.state.borrow_mut();
+            state.home_directory = root.clone();
+            synchronize(&state);
+            assert_eq!(state.controls.path.value(), "~");
+            state.path_focused = true;
+            state.path_input = "~/child".into();
+        }
+        send(&view, key(Key::Enter));
+        assert_eq!(view.current_directory(), root.join("child"));
+        assert!(!view.state.borrow().path_focused);
+        let state = view.state.borrow();
+        synchronize(&state);
+        assert_eq!(state.controls.path.value(), "~/child");
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use viewkit::platform::KeyModifiers;
@@ -955,12 +1007,20 @@ mod tests {
     }
     fn send(view: &FilesView, event: ViewEvent) {
         let theme = Theme::current();
-        let mut text = viewkit::typography::TextMeasurer::new();
-        view.handle_event(
-            Rect::new(0., 0., 920., 640.),
-            &event,
-            &mut EventContext::new(&theme, &theme.typography, &mut text),
-        );
+        // The real runtime retains its text measurer across pointer events.
+        // Recreating it here scans host fonts between clicks and can exceed
+        // the real 500ms double-click interval under parallel test load.
+        thread_local! {
+            static TEXT: RefCell<viewkit::typography::TextMeasurer> =
+                RefCell::new(viewkit::typography::TextMeasurer::new());
+        }
+        TEXT.with(|text| {
+            view.handle_event(
+                Rect::new(0., 0., 920., 640.),
+                &event,
+                &mut EventContext::new(&theme, &theme.typography, &mut text.borrow_mut()),
+            );
+        });
     }
     fn key(key: Key) -> ViewEvent {
         ViewEvent::KeyPressed {
@@ -1277,5 +1337,38 @@ mod tests {
         send(&view, key(Key::Enter));
         assert_eq!(view.current_directory(), root.join("child2"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod location_presentation_tests {
+    use super::*;
+    #[test]
+    fn home_labels_round_trip_without_confusing_system_root_or_sibling_paths() {
+        for home in [
+            Path::new("/home/example"),
+            Path::new("/preview/session/home"),
+        ] {
+            for relative in ["", "Documents", "Documents/日本語"] {
+                let path = home.join(relative);
+                let label = location_label(&path, home);
+                assert_eq!(location_target(&label, home), path);
+                assert!(!label.contains("/preview/session"));
+            }
+            assert_eq!(tree_root_title(home, home), "Home");
+            assert_eq!(tree_root_title(Path::new("/"), home), "/");
+        }
+        assert_eq!(
+            location_label(Path::new("/home/example2"), Path::new("/home/example")),
+            "/home/example2"
+        );
+        assert_eq!(
+            location_label(Path::new("/system"), Path::new("/")),
+            "/system"
+        );
+        assert_eq!(
+            location_target("~//Documents", Path::new("/home/example")),
+            Path::new("/home/example/Documents")
+        );
     }
 }

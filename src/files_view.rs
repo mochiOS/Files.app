@@ -1633,7 +1633,7 @@ impl View for FilesView {
                         true
                     }
                     Key::Enter if state.path_focused => {
-                        let path = PathBuf::from(&state.path_input);
+                        let path = standard_ui::location_target(&state.path_input, &state.home_directory);
                         if Self::navigate(&mut state, path) {
                             state.path_focused = false;
                             state.path_input.clear();
