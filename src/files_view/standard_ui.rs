@@ -126,13 +126,13 @@ fn synchronize(state: &FilesState) {
 
 fn path_field(state: &FilesState) -> TextField {
     TextField::with_interaction(state.controls.path.clone())
-        .size(TextFieldSize::Small)
+        .size(TextFieldSize::Medium)
         .placeholder("Location")
         .on_submit(state.controls.submit(true))
 }
 fn search_field(state: &FilesState) -> TextField {
     TextField::with_interaction(state.controls.search.clone())
-        .size(TextFieldSize::Small)
+        .size(TextFieldSize::Medium)
         .placeholder("Search")
         .leading_symbol(IconName::Search)
 }
@@ -153,7 +153,6 @@ fn toolbar_button(
     Button::with_interaction_and_label(state.controls.button(label), "")
         .leading_symbol(symbol)
         .toolbar()
-        .size(ButtonSize::Small)
         .enabled(enabled)
         .style(if selected {
             ButtonStyle::Standard
@@ -166,7 +165,7 @@ fn toolbar_button(
 }
 
 fn toolbar(state: &FilesState) -> impl View {
-    let side = Theme::current().layout.icon_button_size;
+    let side = Theme::current().controls.height;
     Toolbar::new(
         HStack::new()
             .gap(viewkit::prelude::StackGap::Small)
@@ -966,6 +965,47 @@ pub(super) fn handle(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn toolbar_fields_and_actions_share_native_height_and_center() {
+        use viewkit::{
+            accessibility::AccessibilityRole, draw_command::DisplayList, typography::TextMeasurer,
+        };
+        let (root, view) = fixture();
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            for width in [640., 920., 1280.] {
+                let mut list = DisplayList::new();
+                let mut nodes = Vec::new();
+                let mut text = TextMeasurer::new();
+                let bounds = Rect::new(0., 0., width, theme.layout.top_bar_height);
+                toolbar(&view.state.borrow()).paint(
+                    bounds,
+                    &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
+                        .with_accessibility_nodes(&mut nodes),
+                );
+                let controls: Vec<_> = nodes
+                    .iter()
+                    .filter(|node| {
+                        matches!(
+                            node.role,
+                            AccessibilityRole::Button | AccessibilityRole::TextField
+                        )
+                    })
+                    .collect();
+                assert_eq!(controls.len(), 6);
+                for control in controls {
+                    assert_eq!(control.bounds.size.height, theme.controls.height);
+                    assert_eq!(
+                        control.bounds.origin.y + control.bounds.size.height / 2.,
+                        bounds.size.height / 2.
+                    );
+                    assert!(control.bounds.origin.x >= bounds.origin.x);
+                    assert!(control.bounds.origin.x + control.bounds.size.width <= width + 0.01);
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn home_relative_location_navigates_through_the_existing_browser() {
         let (root, view) = fixture();
