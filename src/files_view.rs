@@ -18,7 +18,9 @@ use viewkit::draw_command::DrawCommand;
 use viewkit::event::{ContextMenuItem, ContextMenuRequest, EventContext, EventResult, ViewEvent};
 use viewkit::geometry::{Point, Rect, Size};
 use viewkit::platform::{Key, PointerButton};
-use viewkit::prelude::{ImageContentMode, ImageData, SvgData};
+use viewkit::prelude::{
+    ImageContentMode, ImageData, InputMode, InteractionMetrics, SvgData, WindowEnvironment,
+};
 use viewkit::theme::Theme;
 use viewkit::typography::{TextAlignment, TextRole};
 use viewkit::view::{Constraints, MeasureContext, PaintContext, View};
@@ -415,7 +417,7 @@ impl FilesView {
         false
     }
 
-    fn activate_entry(state: &mut FilesState, index: usize) -> bool {
+    fn activate_entry(state: &mut FilesState, index: usize, touch: bool) -> bool {
         let Some(entry) = state.browser.entries().get(index).cloned().cloned() else {
             return false;
         };
@@ -437,7 +439,7 @@ impl FilesView {
             path == &entry.path && now.saturating_duration_since(*clicked_at) <= DOUBLE_CLICK
         });
         state.last_click = Some((entry.path.clone(), now));
-        if is_double_click {
+        if is_double_click || (touch && (entry.is_directory() || state.file_activation.is_none())) {
             return Self::open_path(state, &entry);
         }
         true
@@ -610,7 +612,9 @@ impl FilesView {
                 .get(index)
                 .map(|row| row.path.clone())
                 .is_some_and(|path| Self::navigate(state, path)),
-            Some(HitTarget::Entry(index)) => Self::activate_entry(state, index),
+            Some(HitTarget::Entry(index)) => {
+                Self::activate_entry(state, index, layout.input == InputMode::Touch)
+            }
             Some(HitTarget::Content) => {
                 state.browser.clear_selection();
                 state.last_click = None;
@@ -867,9 +871,13 @@ impl View for FilesView {
 
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
         self.advance_operation();
-        let layout = Layout::new(bounds);
+        let layout = Layout::with_environment(bounds, context.environment());
         {
             let mut state = self.state.borrow_mut();
+            state.scroll = state.scroll.clamp(0.0, maximum_scroll(&layout, &state));
+            state.sidebar_scroll = state
+                .sidebar_scroll
+                .clamp(0.0, maximum_sidebar_scroll(&layout, &state));
             let paths = standard_ui::thumbnail_paths(&layout, &state);
             state.icons.thumbnails.request(paths);
         }
@@ -996,7 +1004,11 @@ impl View for FilesView {
                     let mut state = self.state.borrow_mut();
                     state.last_click = None;
                     context.clear_keyboard_focus();
-                    standard_ui::focus_selected(&Layout::new(bounds), &mut state, context);
+                    standard_ui::focus_selected(
+                        &Layout::with_environment(bounds, context.environment()),
+                        &mut state,
+                        context,
+                    );
                 }
                 _ => {}
             }
@@ -1035,7 +1047,7 @@ impl View for FilesView {
                 }
             }
         }
-        let layout = Layout::new(bounds);
+        let layout = Layout::with_environment(bounds, context.environment());
         if self.state.borrow().operation.is_some() {
             let frame = Self::operation_frame(bounds);
             let (cancellable, conflict) = {
@@ -1613,7 +1625,7 @@ impl View for FilesView {
                     Key::ArrowUp if !state.path_focused && state.name_edit.is_none() => {
                         let extend = modifiers.shift() && state.file_activation.is_none();
                         let offset = if state.browser.view_mode() == ViewMode::Grid {
-                            -(grid_column_count(layout.content) as isize)
+                            -(grid_column_count(&layout) as isize)
                         } else {
                             -1
                         };
@@ -1624,7 +1636,7 @@ impl View for FilesView {
                     Key::ArrowDown if !state.path_focused && state.name_edit.is_none() => {
                         let extend = modifiers.shift() && state.file_activation.is_none();
                         let offset = if state.browser.view_mode() == ViewMode::Grid {
-                            grid_column_count(layout.content) as isize
+                            grid_column_count(&layout) as isize
                         } else {
                             1
                         };
@@ -1671,6 +1683,11 @@ impl View for FilesView {
 }
 
 struct Layout {
+    input: InputMode,
+    metrics: InteractionMetrics,
+    stacked_toolbar: bool,
+    favorite_pitch: f32,
+    tree_pitch: f32,
     bounds: Rect,
     toolbar: Rect,
     sidebar: Rect,
@@ -1681,27 +1698,56 @@ struct Layout {
 
 impl Layout {
     fn new(bounds: Rect) -> Self {
+        Self::with_environment(bounds, WindowEnvironment::default())
+    }
+    fn with_environment(bounds: Rect, environment: WindowEnvironment) -> Self {
         let theme = Theme::current();
+        let bounds = environment.content_bounds(bounds);
+        let metrics = InteractionMetrics::new(&theme, environment.input_mode);
+        let touch = environment.input_mode == InputMode::Touch;
+        let stacked_toolbar = touch
+            && bounds.size.width
+                < theme.layout.navigation_sidebar_width
+                    + metrics.control_height * 4.0
+                    + theme.layout.form_control_width * 2.0;
+        let toolbar_height = if stacked_toolbar {
+            metrics.toolbar_height + metrics.control_height + theme.spacing.small
+        } else {
+            metrics.toolbar_height
+        };
         let body = Rect::new(
             bounds.origin.x,
-            bounds.origin.y + theme.layout.top_bar_height,
+            bounds.origin.y + toolbar_height,
             bounds.size.width,
-            (bounds.size.height - theme.layout.top_bar_height).max(0.),
+            (bounds.size.height - toolbar_height).max(0.),
         );
         let (sidebar, _, content) = viewkit::prelude::NavigationSplitView::new(
             viewkit::prelude::HStack::new(),
             viewkit::prelude::HStack::new(),
         )
         .shows_divider(false)
+        .fixed_sidebar(if touch {
+            theme
+                .layout
+                .navigation_sidebar_width
+                .min(bounds.size.width * 0.32)
+        } else {
+            theme.layout.navigation_sidebar_width
+        })
         .content_regions(body, &theme);
         let sidebar_width = sidebar.size.width;
         Self {
+            input: environment.input_mode,
+            metrics,
+            stacked_toolbar,
+            favorite_pitch: metrics.sidebar_row_height,
+            tree_pitch: if touch { metrics.row_height } else { 32.0 },
             bounds,
             toolbar: Rect::new(
                 bounds.origin.x,
                 bounds.origin.y,
                 bounds.size.width,
-                Theme::current().layout.top_bar_height,
+                toolbar_height,
             ),
             sidebar,
             content: Rect::new(
@@ -1719,6 +1765,25 @@ impl Layout {
             sidebar_width,
         }
     }
+    fn favorite_rect(&self, index: usize, scroll: f32) -> Rect {
+        Rect::new(
+            self.sidebar.origin.x + 8.0,
+            self.sidebar.origin.y + 42.0 + index as f32 * self.favorite_pitch - scroll,
+            (self.sidebar_width - 16.0).max(0.0),
+            if self.input == InputMode::Touch {
+                self.metrics.control_height
+            } else {
+                29.0
+            },
+        )
+    }
+    fn disclosure_width(&self) -> f32 {
+        if self.input == InputMode::Touch {
+            self.metrics.control_height
+        } else {
+            20.0
+        }
+    }
 }
 
 fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
@@ -1726,22 +1791,22 @@ fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext
 }
 
 fn tree_start_y(layout: &Layout, state: &FilesState) -> f32 {
-    layout.sidebar.origin.y + 42.0 + state.sidebar_items.len() as f32 * 34.0 + 24.0
+    layout.sidebar.origin.y + 42.0 + state.sidebar_items.len() as f32 * layout.favorite_pitch + 24.0
         - state.sidebar_scroll
 }
 fn tree_row_rect(layout: &Layout, state: &FilesState, index: usize) -> Rect {
     Rect::new(
         layout.sidebar.origin.x + 8.0,
-        tree_start_y(layout, state) + index as f32 * 32.0,
+        tree_start_y(layout, state) + index as f32 * layout.tree_pitch,
         layout.sidebar_width - 16.0,
-        30.0,
+        layout.tree_pitch - 2.0,
     )
 }
 fn maximum_sidebar_scroll(layout: &Layout, state: &FilesState) -> f32 {
     (42.0
-        + state.sidebar_items.len() as f32 * 34.0
+        + state.sidebar_items.len() as f32 * layout.favorite_pitch
         + 24.0
-        + state.folder_tree.rows().len() as f32 * 32.0
+        + state.folder_tree.rows().len() as f32 * layout.tree_pitch
         + 12.0
         - layout.sidebar.size.height)
         .max(0.0)
@@ -1788,12 +1853,7 @@ fn list_columns(bounds: Rect) -> [Rect; 4] {
 fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarget> {
     if layout.sidebar.contains(point) {
         for index in 0..state.sidebar_items.len() {
-            let row = Rect::new(
-                layout.sidebar.origin.x + 8.0,
-                layout.sidebar.origin.y + 42.0 + index as f32 * 34.0 - state.sidebar_scroll,
-                layout.sidebar_width - 16.0,
-                29.0,
-            );
+            let row = layout.favorite_rect(index, state.sidebar_scroll);
             if row.contains(point) {
                 return Some(HitTarget::Sidebar(index));
             }
@@ -1805,7 +1865,7 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
             if rect.contains(point) {
                 let indent = (row.depth as f32 * 16.0).min((layout.sidebar_width - 90.0).max(0.0));
                 return Some(
-                    if point.x < rect.origin.x + indent + 20.0 && row.expandable {
+                    if point.x < rect.origin.x + indent + layout.disclosure_width() && row.expandable {
                         HitTarget::TreeExpand(index)
                     } else {
                         HitTarget::TreeNavigate(index)
@@ -1823,10 +1883,10 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
                     - Theme::current().layout.compact_control_height
                     + state.scroll;
                 (relative >= 0.0)
-                    .then_some((relative / Theme::current().layout.control_height) as usize)
+                    .then_some((relative / layout.metrics.row_height) as usize)
             }
             ViewMode::Grid => {
-                let columns = grid_column_count(layout.content);
+                let columns = grid_column_count(&layout);
                 let left = layout.content.origin.x + GRID_SIDE_INSET;
                 let x = point.x - left;
                 let y =
@@ -1834,11 +1894,11 @@ fn hit_test(layout: &Layout, point: Point, state: &FilesState) -> Option<HitTarg
                 if point.y >= layout.content.origin.y + GRID_HEADER_HEIGHT
                     && x >= 0.0
                     && y >= 0.0
-                    && (x / Theme::current().layout.browser_grid_cell_width) < columns as f32
+                    && (x / layout.metrics.grid_cell.width) < columns as f32
                 {
                     Some(
-                        (y / Theme::current().layout.browser_grid_cell_height) as usize * columns
-                            + (x / Theme::current().layout.browser_grid_cell_width) as usize,
+                        (y / layout.metrics.grid_cell.height) as usize * columns
+                            + (x / layout.metrics.grid_cell.width) as usize,
                     )
                 } else {
                     None
@@ -1860,20 +1920,20 @@ fn maximum_scroll(layout: &Layout, state: &FilesState) -> f32 {
     let content_height = match state.browser.view_mode() {
         ViewMode::List => {
             Theme::current().layout.compact_control_height
-                + count as f32 * Theme::current().layout.control_height
+                + count as f32 * layout.metrics.row_height
         }
         ViewMode::Grid => {
-            let columns = grid_column_count(layout.content);
+            let columns = grid_column_count(&layout);
             GRID_HEADER_HEIGHT
                 + 20.0
-                + count.div_ceil(columns) as f32 * Theme::current().layout.browser_grid_cell_height
+                + count.div_ceil(columns) as f32 * layout.metrics.grid_cell.height
         }
     };
     (content_height - layout.content.size.height).max(0.0)
 }
 
-fn grid_column_count(content: Rect) -> usize {
-    ((content.size.width - GRID_SIDE_INSET * 2.0) / Theme::current().layout.browser_grid_cell_width)
+fn grid_column_count(layout: &Layout) -> usize {
+    ((layout.content.size.width - GRID_SIDE_INSET * 2.0) / layout.metrics.grid_cell.width)
         .floor()
         .max(1.0) as usize
 }

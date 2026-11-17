@@ -124,25 +124,26 @@ fn synchronize(state: &FilesState) {
         .set_offset(0., state.sidebar_scroll);
 }
 
-fn path_field(state: &FilesState) -> TextField {
+fn path_field(layout: &Layout, state: &FilesState) -> TextField {
     TextField::with_interaction(state.controls.path.clone())
-        .size(TextFieldSize::Medium)
+        .size(layout.metrics.control_size.into())
         .placeholder("Location")
         .on_submit(state.controls.submit(true))
 }
-fn search_field(state: &FilesState) -> TextField {
+fn search_field(layout: &Layout, state: &FilesState) -> TextField {
     TextField::with_interaction(state.controls.search.clone())
-        .size(TextFieldSize::Medium)
+        .size(layout.metrics.control_size.into())
         .placeholder("Search")
         .leading_symbol(IconName::Search)
 }
-fn name_field(state: &FilesState, edit: &NameEdit) -> TextField {
+fn name_field(layout: &Layout, state: &FilesState, edit: &NameEdit) -> TextField {
     TextField::with_interaction(edit.input.clone())
-        .size(TextFieldSize::Small)
+        .size(layout.metrics.control_size.into())
         .on_submit(state.controls.submit(false))
 }
 
 fn toolbar_button(
+    layout: &Layout,
     state: &FilesState,
     target: HitTarget,
     label: &'static str,
@@ -153,6 +154,7 @@ fn toolbar_button(
     Button::with_interaction_and_label(state.controls.button(label), "")
         .leading_symbol(symbol)
         .toolbar()
+        .size(layout.metrics.control_size.into())
         .enabled(enabled)
         .style(if selected {
             ButtonStyle::Standard
@@ -164,67 +166,91 @@ fn toolbar_button(
         .on_click(state.controls.select(target))
 }
 
-fn toolbar(state: &FilesState) -> impl View {
-    let side = Theme::current().controls.height;
-    Toolbar::new(
-        HStack::new()
-            .gap(viewkit::prelude::StackGap::Small)
-            .child(
-                toolbar_button(
-                    state,
-                    HitTarget::Back,
-                    "Back",
-                    IconName::ChevronLeft,
-                    state.browser.can_go_back(),
-                    false,
-                )
-                .frame(side, side)
-                .flex_shrink(0.),
+fn toolbar(layout: &Layout, state: &FilesState) -> Box<dyn View> {
+    let side = layout.metrics.control_height;
+    let navigation = HStack::new()
+        .gap(viewkit::prelude::StackGap::Small)
+        .child(
+            toolbar_button(
+                layout,
+                state,
+                HitTarget::Back,
+                "Back",
+                IconName::ChevronLeft,
+                state.browser.can_go_back(),
+                false,
             )
-            .child(
-                toolbar_button(
-                    state,
-                    HitTarget::Forward,
-                    "Forward",
-                    IconName::ChevronRight,
-                    state.browser.can_go_forward(),
-                    false,
-                )
-                .frame(side, side)
-                .flex_shrink(0.),
+            .frame(side, side)
+            .flex_shrink(0.),
+        )
+        .child(
+            toolbar_button(
+                layout,
+                state,
+                HitTarget::Forward,
+                "Forward",
+                IconName::ChevronRight,
+                state.browser.can_go_forward(),
+                false,
             )
-            .child(path_field(state).layout().flex_grow(1.).flex_shrink(1.))
-            .child(
-                toolbar_button(
-                    state,
-                    HitTarget::ListMode,
-                    "List view",
-                    IconName::LayoutList,
-                    true,
-                    state.browser.view_mode() == ViewMode::List,
-                )
-                .frame(side, side)
-                .flex_shrink(0.),
+            .frame(side, side)
+            .flex_shrink(0.),
+        )
+        .child(
+            path_field(layout, state)
+                .layout()
+                .flex_grow(1.)
+                .flex_shrink(1.),
+        )
+        .child(
+            toolbar_button(
+                layout,
+                state,
+                HitTarget::ListMode,
+                "List view",
+                IconName::LayoutList,
+                true,
+                state.browser.view_mode() == ViewMode::List,
             )
-            .child(
-                toolbar_button(
-                    state,
-                    HitTarget::GridMode,
-                    "Icon view",
-                    IconName::LayoutGrid,
-                    true,
-                    state.browser.view_mode() == ViewMode::Grid,
-                )
-                .frame(side, side)
-                .flex_shrink(0.),
+            .frame(side, side)
+            .flex_shrink(0.),
+        )
+        .child(
+            toolbar_button(
+                layout,
+                state,
+                HitTarget::GridMode,
+                "Icon view",
+                IconName::LayoutGrid,
+                true,
+                state.browser.view_mode() == ViewMode::Grid,
             )
-            .child(search_field(state).layout().width(202.).flex_shrink(1.)),
-    )
+            .frame(side, side)
+            .flex_shrink(0.),
+        );
+    if layout.stacked_toolbar {
+        Box::new(Toolbar::new(
+            VStack::new()
+                .gap(viewkit::prelude::StackGap::Small)
+                .alignment(viewkit::prelude::StackAlignment::Stretch)
+                .child(navigation)
+                .child(search_field(layout, state)),
+        ))
+    } else {
+        Box::new(Toolbar::new(
+            navigation.child(
+                search_field(layout, state)
+                    .layout()
+                    .width(Theme::current().layout.form_control_width)
+                    .flex_shrink(1.),
+            ),
+        ))
+    }
 }
 
 pub(super) fn paint_toolbar(layout: &Layout, state: &FilesState, context: &mut PaintContext<'_>) {
     synchronize(state);
-    toolbar(state).paint(layout.toolbar, context);
+    toolbar(layout, state).paint(layout.toolbar, context);
 }
 
 struct Pane<'a> {
@@ -261,6 +287,7 @@ pub(super) fn paint_split(layout: &Layout, state: &FilesState, context: &mut Pai
         },
     )
     .shows_divider(false)
+    .fixed_sidebar(layout.sidebar_width)
     .sidebar_insets(viewkit::edge_insets::EdgeInsets::ZERO)
     .paint(body, context);
 }
@@ -308,12 +335,7 @@ fn sidebar_image(state: &FilesState, icon: SidebarIcon) -> impl View + 'static {
 fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
     let mut items = Vec::new();
     for (index, item) in state.sidebar_items.iter().enumerate() {
-        let bounds = Rect::new(
-            layout.sidebar.origin.x + 8.,
-            layout.sidebar.origin.y + 42. + index as f32 * 34. - state.sidebar_scroll,
-            layout.sidebar_width - 16.,
-            29.,
-        );
+        let bounds = layout.favorite_rect(index, state.sidebar_scroll);
         if bounds.intersection(layout.sidebar).is_none() {
             continue;
         }
@@ -357,7 +379,7 @@ fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
             title,
         )
         .leading(sidebar_image(state, SidebarIcon::Folder))
-        .indent(indent + 20.)
+        .indent(indent + layout.disclosure_width())
         .selected(state.browser.current_dir() == row.path)
         .on_select(state.controls.select(HitTarget::TreeNavigate(index)));
         let disclosure = row.expandable.then(|| {
@@ -373,7 +395,7 @@ fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
                 IconName::ChevronRight
             })
             .toolbar()
-            .size(ButtonSize::Small)
+        .size(layout.metrics.control_size.into())
             .style(ButtonStyle::Ghost)
             .accessibility_label(if row.expanded {
                 "Collapse folder"
@@ -388,6 +410,7 @@ fn sidebar_rows(layout: &Layout, state: &FilesState) -> Vec<Placed> {
                 item,
                 disclosure,
                 indent,
+                disclosure_width: layout.disclosure_width(),
             },
         ));
     }
@@ -398,13 +421,14 @@ struct TreeItem {
     item: NavigationItem,
     disclosure: Option<Button>,
     indent: f32,
+    disclosure_width: f32,
 }
 impl TreeItem {
     fn arrow(&self, bounds: Rect) -> Rect {
         Rect::new(
             bounds.origin.x + self.indent,
             bounds.origin.y,
-            20.,
+            self.disclosure_width,
             bounds.size.height,
         )
     }
@@ -468,24 +492,24 @@ fn entry_rect(layout: &Layout, state: &FilesState, index: usize) -> Rect {
             layout.content.origin.x,
             layout.content.origin.y
                 + theme.layout.compact_control_height
-                + index as f32 * theme.layout.control_height
+                + index as f32 * layout.metrics.row_height
                 - state.scroll,
             layout.content.size.width,
-            theme.layout.control_height,
+            layout.metrics.row_height,
         ),
         ViewMode::Grid => {
-            let columns = grid_column_count(layout.content);
+            let columns = grid_column_count(layout);
             Rect::new(
                 layout.content.origin.x
                     + GRID_SIDE_INSET
-                    + (index % columns) as f32 * theme.layout.browser_grid_cell_width,
+                    + (index % columns) as f32 * layout.metrics.grid_cell.width,
                 layout.content.origin.y
                     + GRID_HEADER_HEIGHT
                     + 12.
-                    + (index / columns) as f32 * theme.layout.browser_grid_cell_height
+                    + (index / columns) as f32 * layout.metrics.grid_cell.height
                     - state.scroll,
-                theme.layout.browser_grid_cell_width,
-                theme.layout.browser_grid_cell_height,
+                layout.metrics.grid_cell.width,
+                layout.metrics.grid_cell.height,
             )
         }
     }
@@ -546,7 +570,7 @@ impl View for EntryContent {
         if !self.editing {
             Text::styled(
                 &self.entry.name,
-                if self.mode == ViewMode::List {
+                if self.mode == ViewMode::List || context.environment().input_mode == InputMode::Touch {
                     TextRole::Label
                 } else {
                     TextRole::Caption
@@ -661,7 +685,7 @@ fn rename_field(layout: &Layout, state: &FilesState) -> Option<Placed> {
         .position(|entry| entry.path == edit.path)?;
     Some(Placed::new(
         name_rect(entry_rect(layout, state, index), state.browser.view_mode()),
-        name_field(state, edit),
+        name_field(layout, state, edit),
     ))
 }
 
@@ -694,7 +718,7 @@ pub(super) fn focus_selected(
     let focus = ViewEvent::KeyboardFocusRequested {
         bounds: Some(bounds),
     };
-    toolbar(state).handle_event(layout.toolbar, &focus, context);
+    toolbar(layout, state).handle_event(layout.toolbar, &focus, context);
     for row in content_rows(layout, state) {
         row.view.handle_event(row.bounds, &focus, context);
     }
@@ -856,7 +880,7 @@ pub(super) fn handle(
             if consumed && event.position().is_none() {
                 // The rename field owns this event.
             } else {
-                consumed |= toolbar(&state).handle_event(layout.toolbar, event, context)
+                consumed |= toolbar(layout, &state).handle_event(layout.toolbar, event, context)
                     == EventResult::Consumed;
             }
         }
@@ -966,6 +990,83 @@ pub(super) fn handle(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn touch_opens_folder_once_while_pointer_keeps_double_click_behavior() {
+        let (root, view) = fixture();
+        let mut state = view.state.borrow_mut();
+        let index = state
+            .browser
+            .entries()
+            .iter()
+            .position(|entry| entry.is_directory())
+            .unwrap();
+        let directory = state.browser.entries()[index].path.clone();
+        assert!(FilesView::activate_entry(&mut state, index, false));
+        assert_eq!(state.browser.current_dir(), root.as_path());
+        state.last_click = None;
+        assert!(FilesView::activate_entry(&mut state, index, true));
+        assert_eq!(state.browser.current_dir(), directory);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn touch_toolbar_and_rows_fit_keyboard_and_share_hit_geometry() {
+        let (root, view) = fixture();
+        let environment = WindowEnvironment {
+            input_mode: InputMode::Touch,
+            safe_area: viewkit::edge_insets::EdgeInsets::new(20., 0., 16., 0.),
+            keyboard_occlusion: Some(Rect::new(0., 600., 600., 300.)),
+        };
+        let layout = Layout::with_environment(Rect::new(0., 0., 600., 900.), environment);
+        assert!(layout.stacked_toolbar);
+        let mut display = viewkit::draw_command::DisplayList::new();
+        let mut nodes = Vec::new();
+        let mut measurer = viewkit::typography::TextMeasurer::new();
+        toolbar(&layout, &view.state.borrow()).paint(
+            layout.toolbar,
+            &mut PaintContext::new(
+                &mut display,
+                &Theme::LIGHT,
+                &Theme::LIGHT.typography,
+                &mut measurer,
+            )
+            .with_accessibility_nodes(&mut nodes),
+        );
+        let fields: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.role == viewkit::accessibility::AccessibilityRole::TextField)
+            .collect();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().all(|field| field.bounds.size.height >= 44.));
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.bounds.size.width >= layout.toolbar.size.width * 0.8)
+        );
+        assert!(layout.status.origin.y + layout.status.size.height <= 600.);
+        assert!(layout.favorite_rect(0, 0.).size.height >= 44.);
+        let first = entry_rect(&layout, &view.state.borrow(), 0);
+        assert!(matches!(
+            hit_test(
+                &layout,
+                Point::new(
+                    first.origin.x + first.size.width * 0.5,
+                    first.origin.y + first.size.height * 0.5
+                ),
+                &view.state.borrow()
+            ),
+            Some(HitTarget::Entry(0))
+        ));
+        let wide = Layout::with_environment(
+            Rect::new(0., 0., 1280., 800.),
+            WindowEnvironment {
+                input_mode: InputMode::Touch,
+                ..Default::default()
+            },
+        );
+        assert!(!wide.stacked_toolbar);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn toolbar_fields_and_actions_share_native_height_and_center() {
         use viewkit::{
             accessibility::AccessibilityRole, draw_command::DisplayList, typography::TextMeasurer,
@@ -977,7 +1078,11 @@ mod tests {
                 let mut nodes = Vec::new();
                 let mut text = TextMeasurer::new();
                 let bounds = Rect::new(0., 0., width, theme.layout.top_bar_height);
-                toolbar(&view.state.borrow()).paint(
+                toolbar(
+                    &Layout::new(Rect::new(0., 0., width, 640.)),
+                    &view.state.borrow(),
+                )
+                .paint(
                     bounds,
                     &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
                         .with_accessibility_nodes(&mut nodes),
